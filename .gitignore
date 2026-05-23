@@ -1,0 +1,30 @@
+# Video files (too large for git)
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Frame extractions
+frames_preview/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+*.suo
+
+# Output / scratch
+*.log
+hand_events.json
+extracted_hands.json
+results/
