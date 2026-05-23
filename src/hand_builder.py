@@ -254,14 +254,20 @@ def _extract_hole_cards(
 ) -> list[str]:
     """
     Tenta extrair hole cards do herói.
-    Em WPT Global as cartas são sprites — OCR limitado, tenta 3 frames.
+    Estratégia: pré-flop (board==0) primeiro, depois flop/turn.
     """
-    candidates = sorted(
+    # Candidatos pré-flop (cartas recém-distribuídas)
+    preflop = sorted(
         [e for e in seg if e.board_cards == 0],
+        key=lambda e: e.timestamp,
+    )[:5]
+    # Candidatos flop/turn (herói ainda na mão)
+    early_board = sorted(
+        [e for e in seg if e.board_cards in (3, 4)],
         key=lambda e: e.timestamp,
     )[:3]
 
-    for ev in candidates:
+    for ev in preflop + early_board:
         frame = _get_frame(video_path, ev.frame_idx)
         if frame is None:
             continue

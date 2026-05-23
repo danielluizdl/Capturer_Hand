@@ -112,53 +112,19 @@ def ocr_stacks(crop: np.ndarray) -> dict[str, float]:
 
 def ocr_board_cards(crop: np.ndarray, n_cards: int) -> list[str]:
     """
-    Tenta extrair as cartas do board via OCR.
-    ROI: y=190:310 (area das cartas comunitarias).
-    Retorna lista de strings como ['Jd', '5s', '2h'] ou [] se falhar.
+    Extrai cartas do board via classificador cor+OCR.
+    Fallback para lista vazia se classifier retornar incompleto.
     """
     if n_cards == 0:
         return []
-
-    roi = crop[190:310, 250:700]
-    items = _raw_ocr(roi)
-    all_text = " ".join(t for _, t, _ in items)
-
-    cards = _parse_cards_from_text(all_text)
-    if len(cards) >= n_cards:
-        return cards[:n_cards]
-
-    # Fallback: OCR em área mais ampla
-    roi2 = crop[170:330, 200:750]
-    items2 = _raw_ocr(roi2)
-    all_text2 = " ".join(t for _, t, _ in items2)
-    cards2 = _parse_cards_from_text(all_text2)
-    if cards2:
-        return cards2[:n_cards] if len(cards2) >= n_cards else cards2
-
-    return []
+    from src.card_classifier import extract_board_cards
+    return extract_board_cards(crop, n_cards)
 
 
 def ocr_hole_cards(crop: np.ndarray) -> list[str]:
-    """
-    Tenta extrair as hole cards do heroi (dLzinN) via OCR.
-    ROI: y=430:520 (area do heroi na parte inferior).
-    """
-    roi = crop[430:520, 330:640]
-    items = _raw_ocr(roi)
-    all_text = " ".join(t for _, t, _ in items)
-    cards = _parse_cards_from_text(all_text)
-    if len(cards) >= 2:
-        return cards[:2]
-
-    # Tenta area ligeiramente maior
-    roi2 = crop[410:530, 290:670]
-    items2 = _raw_ocr(roi2)
-    all_text2 = " ".join(t for _, t, _ in items2)
-    cards2 = _parse_cards_from_text(all_text2)
-    if len(cards2) >= 2:
-        return cards2[:2]
-
-    return []
+    """Extrai hole cards do herói via classificador cor+OCR."""
+    from src.card_classifier import extract_hole_cards
+    return extract_hole_cards(crop)
 
 
 def ocr_winner(crop: np.ndarray) -> str | None:

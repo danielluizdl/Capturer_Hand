@@ -21,12 +21,14 @@ MAX_NO_PROGRESS = 3
 DEFAULT_CONFIG = {
     "fps": 10.0,
     "slot_thresholds": [25, 33, 38, 25, 30],
-    "pot_roi": [155, 210, 230, 750],       # y1,y2,x1,x2
+    "pot_roi": [155, 210, 230, 750],
     "board_roi": [190, 310, 250, 700],
     "hole_roi": [430, 520, 330, 640],
     "winner_roi": [150, 400, 100, 860],
     "pot_diff_thr": 4.0,
     "action_bar_top_f": 0.900,
+    "spades_v_threshold": 90,
+    "classify_hw_f": 0.028,
 }
 
 
@@ -58,6 +60,14 @@ def apply_config(cfg: dict) -> None:
 
     # Armazena config globalmente para uso no ocr_engine
     ocr._CONFIG = cfg
+
+    # Aplica config do classificador de cartas
+    try:
+        import src.card_classifier as cc
+        cc.SPADES_V_THRESHOLD = cfg.get("spades_v_threshold", 90)
+        cc.CLASSIFY_HW_F      = cfg.get("classify_hw_f", 0.028)
+    except ImportError:
+        pass
 
 
 def run_pipeline(cfg: dict) -> tuple:
@@ -108,21 +118,27 @@ def suggest_adjustment(gaps: list[dict], cfg: dict, history: list[float]) -> dic
     tid    = top["table_id"]
 
     if field == "board_cards":
-        # Tenta ajustar thresholds para melhorar detecção de cartas
         det_board = top["data"]["det_board"]
         gab_board = top["data"]["gab_board"]
+        curr_v = new_cfg.get("spades_v_threshold", 90)
+        curr_hw = new_cfg.get("classify_hw_f", 0.028)
         if len(det_board) < len(gab_board):
-            # Subestimando cartas: reduz thresholds
-            for i in range(5):
-                if new_cfg["slot_thresholds"][i] > 10:
-                    new_cfg["slot_thresholds"][i] = max(10, new_cfg["slot_thresholds"][i] - 3)
-            print(f"Ajuste: reduzindo slot_thresholds → {new_cfg['slot_thresholds']}")
+            # Detectando menos cartas que o esperado
+            # Tentar limiar de espadas mais alto (misclassificando copas como espadas?)
+            new_cfg["spades_v_threshold"] = min(130, curr_v + 5)
+            # Também tentar janela de classificação mais larga
+            new_cfg["classify_hw_f"] = min(0.040, curr_hw + 0.003)
+            print(f"Ajuste board: spades_v_threshold {curr_v}→{new_cfg['spades_v_threshold']}, hw {curr_hw:.3f}→{new_cfg['classify_hw_f']:.3f}")
         elif len(det_board) > len(gab_board):
-            # Superestimando: aumenta thresholds
-            for i in range(5):
-                if new_cfg["slot_thresholds"][i] < 60:
-                    new_cfg["slot_thresholds"][i] = min(60, new_cfg["slot_thresholds"][i] + 3)
-            print(f"Ajuste: aumentando slot_thresholds → {new_cfg['slot_thresholds']}")
+            new_cfg["spades_v_threshold"] = max(60, curr_v - 5)
+            print(f"Ajuste board: spades_v_threshold {curr_v}→{new_cfg['spades_v_threshold']}")
+        elif det_board and gab_board and any(
+            d != g for d, g in zip(det_board, gab_board)
+        ):
+            # Quantidade certa mas cartas erradas — provavelmente rank OCR falhou
+            # Tentar janela mais larga para dar mais contexto ao OCR
+            new_cfg["classify_hw_f"] = min(0.040, curr_hw + 0.002)
+            print(f"Ajuste board (rank): classify_hw_f {curr_hw:.3f}→{new_cfg['classify_hw_f']:.3f}")
 
     elif field == "street_sequence":
         det_s = set(top["data"]["det_streets"])
