@@ -1,5 +1,4 @@
-# Video files (too large for git)
-*.mp4
+# Video files (too large for git — exceto o vídeo de teste)
 *.avi
 *.mov
 *.mkv
