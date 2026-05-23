@@ -25,10 +25,13 @@ CARD_Y1_F    = 0.34
 CARD_Y2_F    = 0.56
 CLASSIFY_HW_F = 0.028   # mais largo que o HW de detecção (0.020)
 
-# Posição das hole cards do herói no crop de mesa (pixels)
-HERO_Y1, HERO_Y2          = 430, 520
-HERO_LEFT_X1, HERO_LEFT_X2   = 345, 415
-HERO_RIGHT_X1, HERO_RIGHT_X2 = 425, 495
+# Posição das hole cards do herói no crop de mesa (pixels absolutos, h=540)
+# Calibrado: '94' encontrado em bbox [441,389,490,424]; Ah detectado em 430:462
+HERO_Y1, HERO_Y2          = 370, 435
+HERO_LEFT_X1, HERO_LEFT_X2   = 430, 462
+HERO_RIGHT_X1, HERO_RIGHT_X2 = 462, 495
+# Shift para rank: texto fica ~15px à esquerda do início do crop
+HERO_RANK_SHIFT = 15
 
 
 def _get_ocr():
@@ -79,7 +82,8 @@ def detect_suit(card_crop: np.ndarray) -> str:
 def detect_rank(card_crop: np.ndarray) -> str | None:
     """
     OCR na carta para extrair o rank.
-    Tenta múltiplas estratégias de pré-processamento.
+    O rank no WPT Global aparece no centro vertical da carta (y≈45-55%),
+    não no topo. Usa 4x upscale fixo para cartas pequenas.
     Retorna rank normalizado: '2'-'9', 'T', 'J', 'Q', 'K', 'A' ou None.
     """
     if card_crop is None or card_crop.size == 0:
@@ -87,35 +91,33 @@ def detect_rank(card_crop: np.ndarray) -> str | None:
 
     h, w = card_crop.shape[:2]
     gray = cv2.cvtColor(card_crop, cv2.COLOR_BGR2GRAY)
-    top  = gray[:max(1, h // 2), :]   # rank está no topo
 
-    # Estratégia 1: limiar alto — texto branco em fundo colorido
-    _, thresh_white = cv2.threshold(top, 170, 255, cv2.THRESH_BINARY)
-    # Estratégia 2: CLAHE para realce de contraste
+    # O rank está em ~45% da altura — usar a carta inteira para não cortar
+    full   = gray
+    # Faixa central onde o rank aparece (evita pot-text acima e suit abaixo)
+    mid_y1 = max(0, int(h * 0.35))
+    mid_y2 = min(h, int(h * 0.75))
+    mid    = gray[mid_y1:mid_y2, :]
+
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
-    enhanced = clahe.apply(top)
-    # Estratégia 3: carta inteira, limiar médio
-    _, thresh_full = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
 
     ocr = _get_ocr()
 
-    for img in [thresh_white, enhanced, thresh_full, top]:
-        # Upscale para melhor OCR (cartas são pequenas ~55px)
-        scale = max(1, 64 // max(img.shape[0], 1))
-        if scale > 1:
-            img = cv2.resize(img, None, fx=scale, fy=scale,
-                             interpolation=cv2.INTER_CUBIC)
-        if len(img.shape) == 2:
-            img_bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        else:
-            img_bgr = img
+    # Inclui inversão para cartas escuras (espadas) onde texto é claro sobre fundo preto
+    candidates = [mid, full, clahe.apply(mid), clahe.apply(full),
+                  255 - mid, 255 - full]
+
+    for img in candidates:
+        # 4x upscale fixo — cartas são pequenas (~50px)
+        img4x = cv2.resize(img, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+        img_bgr = cv2.cvtColor(img4x, cv2.COLOR_GRAY2BGR)
 
         result, _ = ocr(img_bgr)
         if not result:
             continue
 
         all_text = (
-            " ".join(r[1] for r in result if r[2] >= 0.3)
+            " ".join(r[1] for r in result if r[2] >= 0.25)
             .upper()
             .replace("10", "T")
         )
@@ -148,6 +150,10 @@ def extract_board_cards(table_crop: np.ndarray, n_cards: int) -> list[str]:
     """
     Extrai cartas do board usando posições dos slots.
     n_cards deve ser 3, 4 ou 5.
+
+    Usa crops distintos para naipe e rank:
+    - Naipe: crop centrado no slot (cor HSV confiável)
+    - Rank:  crop deslocado 25px para a esquerda (rank está no top-left da carta)
     """
     if n_cards not in (3, 4, 5):
         return []
@@ -157,15 +163,29 @@ def extract_board_cards(table_crop: np.ndarray, n_cards: int) -> list[str]:
     y2  = int(h * CARD_Y2_F)
     hw  = int(w * CLASSIFY_HW_F)
 
+    # Offset em pixels: rank fica ~25px à esquerda do centro do slot
+    RANK_LEFT_SHIFT = 25
+
     cards: list[str] = []
     for i in range(n_cards):
         cx  = int(w * SLOT_X[i])
+
+        # --- Naipe: crop centrado ---
         sx1 = max(0, cx - hw)
         sx2 = min(w, cx + hw)
-        card_crop = table_crop[y1:y2, sx1:sx2]
-        card = classify_card(card_crop)
-        if card:
-            cards.append(card)
+        suit_crop = table_crop[y1:y2, sx1:sx2]
+        suit = detect_suit(suit_crop)
+        if suit == "?":
+            continue
+
+        # --- Rank: crop deslocado para a esquerda ---
+        rx1 = max(0, cx - hw - RANK_LEFT_SHIFT)
+        rx2 = min(w, cx + hw - RANK_LEFT_SHIFT)
+        rank_crop = table_crop[y1:y2, rx1:rx2]
+        rank = detect_rank(rank_crop)
+
+        if rank:
+            cards.append(rank + suit)
 
     return cards
 
@@ -173,19 +193,32 @@ def extract_board_cards(table_crop: np.ndarray, n_cards: int) -> list[str]:
 def extract_hole_cards(table_crop: np.ndarray) -> list[str]:
     """
     Extrai hole cards do herói (dLzinN) na posição inferior central.
+    Usa crops separados para naipe (centrado) e rank (deslocado à esquerda).
     Retorna lista de 0, 1 ou 2 cartas.
     """
-    h, _w = table_crop.shape[:2]
+    h, w = table_crop.shape[:2]
     y1 = min(HERO_Y1, h - 10)
     y2 = min(HERO_Y2, h)
 
-    left_crop  = table_crop[y1:y2, HERO_LEFT_X1:HERO_LEFT_X2]
-    right_crop = table_crop[y1:y2, HERO_RIGHT_X1:HERO_RIGHT_X2]
-
     cards: list[str] = []
-    for crop in [left_crop, right_crop]:
-        card = classify_card(crop)
-        if card:
-            cards.append(card)
+    for suit_x1, suit_x2 in [(HERO_LEFT_X1, HERO_LEFT_X2),
+                               (HERO_RIGHT_X1, HERO_RIGHT_X2)]:
+        suit_crop = table_crop[y1:y2, suit_x1:suit_x2]
+        suit = detect_suit(suit_crop)
+        if suit == "?":
+            continue
+
+        # Rank: tenta sem shift primeiro, depois com shift de 15px
+        rank = None
+        for shift in [0, HERO_RANK_SHIFT, HERO_RANK_SHIFT * 2]:
+            rx1 = max(0, suit_x1 - shift)
+            rx2 = max(0, suit_x2 - shift)
+            rank_crop = table_crop[y1:y2, rx1:rx2]
+            rank = detect_rank(rank_crop)
+            if rank:
+                break
+
+        if rank:
+            cards.append(rank + suit)
 
     return cards

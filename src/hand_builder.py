@@ -2,6 +2,7 @@
 from __future__ import annotations
 import cv2
 import numpy as np
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -176,12 +177,18 @@ def _extract_board(
     video_path: str,
 ) -> list[str]:
     """
-    Tenta extrair cartas do board via OCR.
-    Em WPT Global as cartas são sprites gráficos — OCR raramente funciona.
-    Mantém apenas 1 tentativa por street para não desperdiçar tempo.
+    Extrai cartas do board via classificador cor+OCR.
+    Tenta múltiplos frames por street e usa votação por maioria de naipe
+    para resistir a frames de transição/animação.
     """
     board: list[str] = []
     detected: dict[str, list[str]] = {}
+
+    cap_info = cv2.VideoCapture(video_path)
+    native_fps = cap_info.get(cv2.CAP_PROP_FPS)
+    cap_info.release()
+    # Tenta até 5 frames após o board_change event (1s a 30fps)
+    EXTRA_FRAMES = [0, 3, 6, 9, 15]
 
     board_changes = sorted(
         [e for e in seg if e.event_type == "board_change"],
@@ -194,21 +201,37 @@ def _extract_board(
         if not street or street in detected:
             continue
 
-        frame = _get_frame(video_path, ev.frame_idx)
-        if frame is None:
-            continue
-        crop = crop_table(frame, tid)
+        # Coleta candidatos de múltiplos frames
+        slot_votes: list[Counter] = [Counter() for _ in range(n)]
 
-        cards = ocr_board_cards(crop, n)
-        if n == 3 and len(cards) >= 3:
-            detected["flop"] = cards[:3]
-        elif n == 4 and len(cards) >= 4:
-            detected["flop"]  = cards[:3]
-            detected["turn"]  = [cards[3]]
-        elif n == 5 and len(cards) >= 5:
-            detected["flop"]  = cards[:3]
-            detected["turn"]  = [cards[3]]
-            detected["river"] = [cards[4]]
+        for offset in EXTRA_FRAMES:
+            fi = ev.frame_idx + offset
+            frame = _get_frame(video_path, fi)
+            if frame is None:
+                continue
+            crop = crop_table(frame, tid)
+            cards = ocr_board_cards(crop, n)
+            if len(cards) == n:
+                for i, card in enumerate(cards):
+                    slot_votes[i][card] += 1
+
+        # Usa a carta mais votada em cada slot (se disponível)
+        voted: list[str] = []
+        for i in range(n):
+            if slot_votes[i]:
+                best = slot_votes[i].most_common(1)[0][0]
+                voted.append(best)
+
+        if len(voted) == n:
+            if n == 3:
+                detected["flop"] = voted[:3]
+            elif n == 4:
+                detected["flop"] = voted[:3]
+                detected["turn"] = [voted[3]]
+            elif n == 5:
+                detected["flop"]  = voted[:3]
+                detected["turn"]  = [voted[3]]
+                detected["river"] = [voted[4]]
 
     for street in ("flop", "turn", "river"):
         if street in detected:
