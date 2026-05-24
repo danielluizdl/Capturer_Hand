@@ -25,14 +25,12 @@ CARD_Y1_F    = 0.34
 CARD_Y2_F    = 0.56
 CLASSIFY_HW_F = 0.028   # mais largo que o HW de detecção (0.020)
 
-# Posição das hole cards do herói como frações do crop (h×w)
-HERO_Y1_F         = 0.685   # 370/540
-HERO_Y2_F         = 0.806   # 435/540
-HERO_LX1_F        = 0.448   # 430/960
-HERO_LX2_F        = 0.481   # 462/960
-HERO_RX1_F        = 0.481   # 462/960
-HERO_RX2_F        = 0.516   # 495/960
-HERO_RANK_SHIFT_F = 0.016   # 15/960
+# Posição das hole cards do herói no crop de mesa (pixels absolutos, h=540)
+# Calibrado: y=370-435 é fixo independente da altura (taskbar cortada embaixo)
+HERO_Y1, HERO_Y2          = 370, 435
+HERO_LEFT_X1, HERO_LEFT_X2   = 430, 462
+HERO_RIGHT_X1, HERO_RIGHT_X2 = 462, 495
+HERO_RANK_SHIFT = 15
 
 
 def _get_ocr():
@@ -83,8 +81,6 @@ def detect_suit(card_crop: np.ndarray) -> str:
 OCR_SUBSTITUTIONS = {
     "Z": "2", "%": "2",
     "b": "6", "G": "6", "g": "6",
-    "q": "9", "S": "5", "B": "8",
-    "O": "0", "I": "1", "l": "1",
 }
 
 
@@ -105,15 +101,14 @@ def detect_rank(card_crop: np.ndarray) -> str | None:
     mid_y1 = max(0, int(h * 0.35))
     mid_y2 = min(h, int(h * 0.75))
     mid    = gray[mid_y1:mid_y2, :]
-    top_left = gray[0:int(h * 0.50), 0:int(w * 0.60)]
 
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
 
     ocr = _get_ocr()
 
-    candidates = [mid, full, top_left,
-                  clahe.apply(mid), clahe.apply(full), clahe.apply(top_left),
-                  255 - mid, 255 - full, 255 - top_left]
+    candidates = [mid, full,
+                  clahe.apply(mid), clahe.apply(full),
+                  255 - mid, 255 - full]
 
     for img in candidates:
         for scale in [6, 4]:
@@ -209,30 +204,27 @@ def extract_board_cards_slotted(table_crop: np.ndarray, n_cards: int) -> list[st
 def extract_hole_cards(table_crop: np.ndarray) -> list[str]:
     """
     Extrai hole cards do herói (dLzinN) na posição inferior central.
-    Usa coordenadas fracionais para suportar alturas de mesa variáveis (540 vs 502px).
+    Coords absolutas — a posição y=370-435 é fixa para h=540 e h=502 porque
+    a taskbar (38px) é cortada pela base, não pelo topo.
     Retorna lista de 0, 1 ou 2 cartas.
     """
     h, w = table_crop.shape[:2]
-    y1    = int(h * HERO_Y1_F)
-    y2    = int(h * HERO_Y2_F)
-    lx1   = int(w * HERO_LX1_F)
-    lx2   = int(w * HERO_LX2_F)
-    rx1   = int(w * HERO_RX1_F)
-    rx2   = int(w * HERO_RX2_F)
-    shift = int(w * HERO_RANK_SHIFT_F)
+    y1 = min(HERO_Y1, h - 10)
+    y2 = min(HERO_Y2, h)
 
     cards: list[str] = []
-    for suit_x1, suit_x2 in [(lx1, lx2), (rx1, rx2)]:
+    for suit_x1, suit_x2 in [(HERO_LEFT_X1, HERO_LEFT_X2),
+                               (HERO_RIGHT_X1, HERO_RIGHT_X2)]:
         suit_crop = table_crop[y1:y2, suit_x1:suit_x2]
         suit = detect_suit(suit_crop)
         if suit == "?":
             continue
 
         rank = None
-        for s in [0, shift, shift * 2]:
-            rx1_ = max(0, suit_x1 - s)
-            rx2_ = max(0, suit_x2 - s)
-            rank_crop = table_crop[y1:y2, rx1_:rx2_]
+        for shift in [0, HERO_RANK_SHIFT, HERO_RANK_SHIFT * 2]:
+            rx1 = max(0, suit_x1 - shift)
+            rx2 = max(0, suit_x2 - shift)
+            rank_crop = table_crop[y1:y2, rx1:rx2]
             rank = detect_rank(rank_crop)
             if rank:
                 break
