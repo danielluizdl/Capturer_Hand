@@ -111,29 +111,28 @@ def detect_rank(card_crop: np.ndarray) -> str | None:
                   255 - mid, 255 - full]
 
     for img in candidates:
-        for scale in [6, 4]:
-            img_scaled = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-            img_bgr = cv2.cvtColor(img_scaled, cv2.COLOR_GRAY2BGR)
+        img4x = cv2.resize(img, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+        img_bgr = cv2.cvtColor(img4x, cv2.COLOR_GRAY2BGR)
 
-            result, _ = ocr(img_bgr)
-            if not result:
-                continue
+        result, _ = ocr(img_bgr)
+        if not result:
+            continue
 
-            all_text = (
-                " ".join(r[1] for r in result if r[2] >= 0.15)
-                .upper()
-                .replace("10", "T")
-            )
-            for old, new in OCR_SUBSTITUTIONS.items():
-                all_text = all_text.replace(old, new)
+        all_text = (
+            " ".join(r[1] for r in result if r[2] >= 0.15)
+            .upper()
+            .replace("10", "T")
+        )
+        for old, new in OCR_SUBSTITUTIONS.items():
+            all_text = all_text.replace(old, new)
 
-            m = RANK_RE.search(all_text)
-            if m:
-                rank = m.group(1).upper()
-                if rank == "10":
-                    rank = "T"
-                if rank in VALID_RANKS:
-                    return rank
+        m = RANK_RE.search(all_text)
+        if m:
+            rank = m.group(1).upper()
+            if rank == "10":
+                rank = "T"
+            if rank in VALID_RANKS:
+                return rank
 
     return None
 
