@@ -16,6 +16,7 @@ class HandHistory:
     total_pot:      float
     winner:         str
     actions:        list[dict]      # [{"street","player","action","amount"}, ...]
+    showdown:       dict = field(default_factory=dict)  # {"player": ["Ac","Td"]}
 
 
 def parse_gabarito(path: str) -> list[HandHistory]:
@@ -93,17 +94,35 @@ def _parse_hand(text: str) -> HandHistory | None:
         pot_by_street[s] = total_pot
 
     actions: list[dict] = []
+    showdown: dict = {}
     current_street = "preflop"
+    in_showdown = False
+
     for line in lines:
         sm = re.match(r"\*\*\* (FLOP|TURN|RIVER|SHOW DOWN|SUMMARY)", line)
         if sm:
             tag = sm.group(1)
             if tag == "FLOP":
                 current_street = "flop"
+                in_showdown = False
             elif tag == "TURN":
                 current_street = "turn"
+                in_showdown = False
             elif tag == "RIVER":
                 current_street = "river"
+                in_showdown = False
+            elif tag == "SHOW DOWN":
+                in_showdown = True
+            elif tag == "SUMMARY":
+                in_showdown = False
+            continue
+
+        if in_showdown:
+            sm2 = re.match(r"(.+?): shows \[(.+?)\]", line)
+            if sm2:
+                player = sm2.group(1).strip()
+                cards = sm2.group(2).split()
+                showdown[player] = cards
             continue
 
         am = re.match(r"(.+?): (folds|checks|calls|bets|raises)", line)
@@ -130,4 +149,5 @@ def _parse_hand(text: str) -> HandHistory | None:
         total_pot=total_pot,
         winner=winner,
         actions=actions,
+        showdown=showdown,
     )

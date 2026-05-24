@@ -2,6 +2,7 @@
 from __future__ import annotations
 from src.gabarito_parser import HandHistory
 
+# Tier 1 — rubric original (já 300/300)
 RUBRIC = {
     "table_id":        10,
     "board_cards":     30,   # 6 pts por carta correta (max 5)
@@ -11,8 +12,20 @@ RUBRIC = {
     "winner":          10,
 }
 
-MAX_PER_HAND = sum(RUBRIC.values())   # 100
-MAX_TOTAL    = 300                     # 3 mãos
+# Tier 2 — ações + showdown (novo, começa em 0/300)
+RUBRIC_T2 = {
+    "preflop_actions": 40,   # % ações corretas (player + tipo)
+    "flop_actions":    20,
+    "turn_actions":    20,
+    "river_actions":   10,
+    "showdown":        10,   # cartas mostradas por player
+}
+
+MAX_PER_HAND    = sum(RUBRIC.values())         # 100
+MAX_PER_HAND_T2 = sum(RUBRIC_T2.values())      # 100
+MAX_TOTAL       = 300                           # tier 1 × 3 mãos
+MAX_TOTAL_T2    = 300                           # tier 2 × 3 mãos
+MAX_TOTAL_ALL   = MAX_TOTAL + MAX_TOTAL_T2      # 600
 
 
 def score_hands(
@@ -21,108 +34,151 @@ def score_hands(
 ) -> dict:
     """
     Emparelha detected com gabarito pelo table_id e calcula score.
-    Retorna dict com breakdown por mão e score total.
+    Retorna dict com breakdown por mão e score total (Tier1 + Tier2 = max 600).
     """
-    # Mapeia gabarito por table_id
     gab_by_id = {h.table_id: h for h in gabarito}
-
-    # Mapeia detected por table_id
     det_by_id: dict[str, HandHistory] = {}
     for h in detected:
         if h.table_id in gab_by_id:
             det_by_id[h.table_id] = h
 
     hand_scores: list[dict] = []
-    total_pts = 0
+    total_t1 = 0
+    total_t2 = 0
 
     for gab_hand in gabarito:
         tid = gab_hand.table_id
         det_hand = det_by_id.get(tid)
         hs = _score_hand(det_hand, gab_hand)
         hand_scores.append(hs)
-        total_pts += hs["total"]
+        total_t1 += hs["total_t1"]
+        total_t2 += hs["total_t2"]
 
-    pct = total_pts / MAX_TOTAL * 100
+    total_all = total_t1 + total_t2
+    pct_t1  = total_t1  / MAX_TOTAL     * 100
+    pct_t2  = total_t2  / MAX_TOTAL_T2  * 100
+    pct_all = total_all / MAX_TOTAL_ALL * 100
 
     return {
-        "total_pts":  total_pts,
-        "max_pts":    MAX_TOTAL,
-        "pct":        pct,
-        "hands":      hand_scores,
+        "total_pts":   total_t1,          # backward compat
+        "total_t1":    total_t1,
+        "total_t2":    total_t2,
+        "total_all":   total_all,
+        "max_pts":     MAX_TOTAL,         # backward compat
+        "max_t1":      MAX_TOTAL,
+        "max_t2":      MAX_TOTAL_T2,
+        "max_all":     MAX_TOTAL_ALL,
+        "pct":         pct_t1,            # backward compat
+        "pct_t1":      pct_t1,
+        "pct_t2":      pct_t2,
+        "pct_all":     pct_all,
+        "hands":       hand_scores,
     }
 
 
 def _score_hand(det: HandHistory | None, gab: HandHistory) -> dict:
-    scores: dict[str, int] = {}
+    # ── Tier 1 ──────────────────────────────────────────────────────────────
+    t1: dict[str, int] = {}
 
-    # table_id
-    if det is not None and det.table_id == gab.table_id:
-        scores["table_id"] = RUBRIC["table_id"]
-    else:
-        scores["table_id"] = 0
+    t1["table_id"] = RUBRIC["table_id"] if (det and det.table_id == gab.table_id) else 0
 
-    # board_cards — proporcional ao total de cartas do gabarito
-    scores["board_cards"] = 0
     det_board = det.board if det else []
     if gab.board:
-        correct = sum(
-            1 for i, card in enumerate(gab.board)
-            if i < len(det_board) and det_board[i].lower() == card.lower()
-        )
-        scores["board_cards"] = round(correct / len(gab.board) * RUBRIC["board_cards"])
+        correct = sum(1 for i, c in enumerate(gab.board)
+                      if i < len(det_board) and det_board[i].lower() == c.lower())
+        t1["board_cards"] = round(correct / len(gab.board) * RUBRIC["board_cards"])
+    else:
+        t1["board_cards"] = 0
 
-    # hole_cards — 10 pts por carta correta
-    scores["hole_cards"] = 0
     det_holes = det.hole_cards if det else []
-    for i, card in enumerate(gab.hole_cards):
-        if i < len(det_holes) and det_holes[i].lower() == card.lower():
-            scores["hole_cards"] += 10
-    scores["hole_cards"] = min(scores["hole_cards"], RUBRIC["hole_cards"])
+    t1["hole_cards"] = 0
+    for i, c in enumerate(gab.hole_cards):
+        if i < len(det_holes) and det_holes[i].lower() == c.lower():
+            t1["hole_cards"] += 10
+    t1["hole_cards"] = min(t1["hole_cards"], RUBRIC["hole_cards"])
 
-    # street_sequence — proporcional às streets jogáveis do gabarito
-    scores["street_sequence"] = 0
     det_streets = set(det.streets) if det else set()
     gab_playable = [s for s in ("flop", "turn", "river") if s in gab.streets]
     if gab_playable:
-        correct_streets = sum(1 for s in gab_playable if s in det_streets)
-        scores["street_sequence"] = round(correct_streets / len(gab_playable) * RUBRIC["street_sequence"])
+        correct_s = sum(1 for s in gab_playable if s in det_streets)
+        t1["street_sequence"] = round(correct_s / len(gab_playable) * RUBRIC["street_sequence"])
+    else:
+        t1["street_sequence"] = 0
 
-    # final_pot — tolerância de 5%/10%/20%
-    scores["final_pot"] = 0
-    if det is not None and det.total_pot and gab.total_pot:
-        diff_pct = abs(det.total_pot - gab.total_pot) / gab.total_pot
-        if diff_pct <= 0.05:
-            scores["final_pot"] = 15
-        elif diff_pct <= 0.10:
-            scores["final_pot"] = 10
-        elif diff_pct <= 0.20:
-            scores["final_pot"] = 5
+    t1["final_pot"] = 0
+    if det and det.total_pot and gab.total_pot:
+        diff = abs(det.total_pot - gab.total_pot) / gab.total_pot
+        t1["final_pot"] = 15 if diff <= 0.05 else 10 if diff <= 0.10 else 5 if diff <= 0.20 else 0
+
+    det_w = (det.winner or "").strip().lower() if det else ""
+    t1["winner"] = RUBRIC["winner"] if det_w and det_w == gab.winner.strip().lower() else 0
+
+    total_t1 = sum(t1.values())
+
+    # ── Tier 2 ──────────────────────────────────────────────────────────────
+    t2: dict[str, int] = {}
+    det_actions = det.actions if det else []
+
+    for street, key, max_pts in [
+        ("preflop", "preflop_actions", RUBRIC_T2["preflop_actions"]),
+        ("flop",    "flop_actions",    RUBRIC_T2["flop_actions"]),
+        ("turn",    "turn_actions",    RUBRIC_T2["turn_actions"]),
+        ("river",   "river_actions",   RUBRIC_T2["river_actions"]),
+    ]:
+        gab_acts = [(a["player"], a["action"]) for a in gab.actions if a["street"] == street]
+        det_acts = [(a["player"], a["action"]) for a in det_actions if a["street"] == street]
+        if not gab_acts:
+            t2[key] = max_pts  # nenhuma ação esperada → pontuação máxima
         else:
-            scores["final_pot"] = 0
+            t2[key] = round(_match_actions(det_acts, gab_acts) / len(gab_acts) * max_pts)
 
-    # winner
-    det_winner = (det.winner or "").strip().lower() if det else ""
-    gab_winner = gab.winner.strip().lower()
-    scores["winner"] = RUBRIC["winner"] if det_winner and det_winner == gab_winner else 0
+    # showdown
+    gab_sd = gab.showdown if gab else {}
+    det_sd = det.showdown if det else {}
+    if not gab_sd:
+        t2["showdown"] = RUBRIC_T2["showdown"]  # sem showdown esperado → full pts
+    else:
+        correct_sd = sum(
+            1 for player, cards in gab_sd.items()
+            if player in det_sd and
+            sorted(c.lower() for c in det_sd[player]) == sorted(c.lower() for c in cards)
+        )
+        t2["showdown"] = round(correct_sd / len(gab_sd) * RUBRIC_T2["showdown"])
 
-    total = sum(scores.values())
+    total_t2 = sum(t2.values())
 
     return {
-        "table_id":   gab.table_id,
-        "total":      total,
-        "max":        MAX_PER_HAND,
-        "scores":     scores,
-        "det_board":  det.board if det else [],
-        "gab_board":  gab.board,
-        "det_holes":  det.hole_cards if det else [],
-        "gab_holes":  gab.hole_cards,
+        "table_id":    gab.table_id,
+        "total":       total_t1,           # backward compat
+        "total_t1":    total_t1,
+        "total_t2":    total_t2,
+        "max":         MAX_PER_HAND,
+        "max_t2":      MAX_PER_HAND_T2,
+        "scores":      t1,
+        "scores_t2":   t2,
+        "det_board":   det.board if det else [],
+        "gab_board":   gab.board,
+        "det_holes":   det.hole_cards if det else [],
+        "gab_holes":   gab.hole_cards,
         "det_streets": det.streets if det else [],
         "gab_streets": gab.streets,
-        "det_pot":    det.total_pot if det else None,
-        "gab_pot":    gab.total_pot,
-        "det_winner": det.winner if det else "",
-        "gab_winner": gab.winner,
+        "det_pot":     det.total_pot if det else None,
+        "gab_pot":     gab.total_pot,
+        "det_winner":  det.winner if det else "",
+        "gab_winner":  gab.winner,
+        "det_actions": det_actions,
+        "gab_actions": gab.actions,
+        "det_showdown": det_sd,
+        "gab_showdown": gab_sd,
     }
+
+
+def _match_actions(det: list[tuple], gab: list[tuple]) -> int:
+    """Conta quantas ações detectadas casam com o gabarito (multiset matching)."""
+    from collections import Counter
+    det_c = Counter(det)
+    gab_c = Counter(gab)
+    return sum(min(det_c[k], gab_c[k]) for k in gab_c)
 
 
 def print_report(report: dict) -> None:
