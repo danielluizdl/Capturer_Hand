@@ -61,13 +61,15 @@ def _score_hand(det: HandHistory | None, gab: HandHistory) -> dict:
     else:
         scores["table_id"] = 0
 
-    # board_cards — 6 pts por carta correta na mesma posição
+    # board_cards — proporcional ao total de cartas do gabarito
     scores["board_cards"] = 0
     det_board = det.board if det else []
-    for i, card in enumerate(gab.board):
-        if i < len(det_board) and det_board[i].lower() == card.lower():
-            scores["board_cards"] += 6
-    scores["board_cards"] = min(scores["board_cards"], RUBRIC["board_cards"])
+    if gab.board:
+        correct = sum(
+            1 for i, card in enumerate(gab.board)
+            if i < len(det_board) and det_board[i].lower() == card.lower()
+        )
+        scores["board_cards"] = round(correct / len(gab.board) * RUBRIC["board_cards"])
 
     # hole_cards — 10 pts por carta correta
     scores["hole_cards"] = 0
@@ -77,13 +79,13 @@ def _score_hand(det: HandHistory | None, gab: HandHistory) -> dict:
             scores["hole_cards"] += 10
     scores["hole_cards"] = min(scores["hole_cards"], RUBRIC["hole_cards"])
 
-    # street_sequence — 5 pts por street correta (flop, turn, river)
+    # street_sequence — proporcional às streets jogáveis do gabarito
     scores["street_sequence"] = 0
     det_streets = set(det.streets) if det else set()
-    for street in ("flop", "turn", "river"):
-        if street in det_streets and street in gab.streets:
-            scores["street_sequence"] += 5
-    scores["street_sequence"] = min(scores["street_sequence"], RUBRIC["street_sequence"])
+    gab_playable = [s for s in ("flop", "turn", "river") if s in gab.streets]
+    if gab_playable:
+        correct_streets = sum(1 for s in gab_playable if s in det_streets)
+        scores["street_sequence"] = round(correct_streets / len(gab_playable) * RUBRIC["street_sequence"])
 
     # final_pot — tolerância de 5%/10%/20%
     scores["final_pot"] = 0

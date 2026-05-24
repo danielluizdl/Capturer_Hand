@@ -11,6 +11,8 @@ import sys
 import time
 import traceback
 
+from src.hh_writer_ps import write_session, compare_key_lines
+
 VIDEO_PATH   = "video_cortado_1min.mp4"
 GABARITO_PATH = "gabarito.txt"
 CONFIG_PATH   = "config.json"
@@ -275,6 +277,13 @@ def main():
 
         report = score_hands(detected, gabarito)
         print_report(report)
+
+        hh_text = write_session(detected)
+        with open("output_hh.txt", "w", encoding="utf-8") as f:
+            f.write(hh_text)
+        print("\n--- Comparacao campo a campo (PS format) ---")
+        compare_key_lines(detected, gabarito)
+        print("--- Output PS salvo em output_hh.txt ---")
 
         pct = report["pct"]
         pts = report["total_pts"]
