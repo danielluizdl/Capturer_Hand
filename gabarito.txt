@@ -23,7 +23,6 @@ easycall86: posts straddle $0.20
 Dealt to dLzinN [9s 4s]
 taymonkha: raises $0.60 to $0.80
 GongFuBoy: folds
-dLzinN: folds
 Fahir651: folds
 老胡头: folds
 dLzinN: folds
@@ -49,13 +48,13 @@ Board [Jd 5s 2h 3d 7s]
 Seat 1: dLzinN (button) folded before Flop (didn't bet)
 Seat 2: Phoenixy (small blind) folded before Flop (didn't bet)
 Seat 3: 浅忆心安 (big blind) folded before Flop (didn't bet)
-Seat 4: easycall86 (straddle) folded showed [Ah 8c] and lost with high card Ace
+Seat 4: easycall86 (straddle) showed [Ah 8c] and lost with high card Ace
 Seat 5: taymonkha collected ($2.15) showed [Ac Td] and won ($2.15) with high card Ace
 Seat 6: GongFuBoy folded before Flop (didn't bet)
-Seat 7: Fahir651 folded (didn't bet)
+Seat 7: Fahir651 folded before Flop (didn't bet)
 Seat 8: 老胡头 folded before Flop (didn't bet)
 
-PokerStars Hand #117001: Hold'em No Limit ($0.05/$0.10/$0.20(0.05)) - 2026/05/21 00:00:01 ET
+PokerStars Hand #117002: Hold'em No Limit ($0.05/$0.10/$0.20(0.05)) - 2026/05/21 00:00:01 ET
 Table 'HL3048' 8-max Seat #3 is the button
 Seat 1: dLzinN ($20.70 in chips)
 Seat 2: Hamster813 ($32.90 in chips)
@@ -144,7 +143,7 @@ TiltLikeBuda: folds
 dLzinN: raises $0.86 to $1.06
 啦啦啦的啦: folds
 都看到可能: folds
-Elbandido: folds
+ElBandido: folds
 XTSB鱼: calls $0.86
 *** FLOP *** [5h Qs 8d]
 XTSB鱼: checks
