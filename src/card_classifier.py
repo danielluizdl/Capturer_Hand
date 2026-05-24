@@ -17,7 +17,7 @@ import numpy as np
 SPADES_V_THRESHOLD = 90
 
 VALID_RANKS = set("23456789TJQKA")
-RANK_RE = re.compile(r'\b(10|[2-9TJQKA])\b')
+RANK_RE = re.compile(r'\b(10|[2-9TJQKAD])\b')
 
 # Posições dos slots das cartas do board (espelha detectors.py)
 SLOT_X       = [0.393, 0.453, 0.513, 0.580, 0.640]
@@ -26,9 +26,10 @@ CARD_Y2_F    = 0.56
 CLASSIFY_HW_F = 0.028   # mais largo que o HW de detecção (0.020)
 
 # Posição das hole cards do herói no crop de mesa (pixels absolutos, h=540)
-# Calibrado: y=370-435 é fixo independente da altura (taskbar cortada embaixo)
+# HERO_LEFT_X2=465 (+3px vs 462): necessário para OCR encontrar rank '2' de paus
+# 'D'→'6' em OCR_SUBSTITUTIONS corrige leitura da fonte WPT para '6' de espadas
 HERO_Y1, HERO_Y2          = 370, 435
-HERO_LEFT_X1, HERO_LEFT_X2   = 430, 462
+HERO_LEFT_X1, HERO_LEFT_X2   = 430, 465
 HERO_RIGHT_X1, HERO_RIGHT_X2 = 462, 495
 HERO_RANK_SHIFT = 15
 
@@ -129,6 +130,8 @@ def detect_rank(card_crop: np.ndarray) -> str | None:
         m = RANK_RE.search(all_text)
         if m:
             rank = m.group(1).upper()
+            if rank == "D":
+                rank = "6"  # '6' misread as 'D' in WPT Global font (word-boundary safe)
             if rank == "10":
                 rank = "T"
             if rank in VALID_RANKS:
@@ -227,6 +230,10 @@ def extract_hole_cards(table_crop: np.ndarray) -> list[str]:
             rank = detect_rank(rank_crop)
             if rank:
                 break
+        if not rank:
+            # Glyph may start 10px left of suit_x1 (e.g. Ah in HL2332)
+            wide_crop = table_crop[y1:y2, max(0, suit_x1 - 10):suit_x2]
+            rank = detect_rank(wide_crop)
 
         if rank:
             cards.append(rank + suit)
