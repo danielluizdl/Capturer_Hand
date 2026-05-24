@@ -4,12 +4,12 @@ Total de iterações: 4
 
 | Iteração | Score | Pts |
 |----------|-------|-----|
-| 1 | 79.7% | 239/300 |
-| 2 | 79.7% | 239/300 |
-| 3 | 79.7% | 239/300 |
-| 4 | 79.7% | 239/300 |
+| 1 | 88.7% | 266/300 |
+| 2 | 88.7% | 266/300 |
+| 3 | 88.7% | 266/300 |
+| 4 | 88.7% | 266/300 |
 
-**Melhor score:** 79.7% (239/300) na iteração 1
+**Melhor score:** 88.7% (266/300) na iteração 1
 
 ## Platô identificado
 
@@ -25,18 +25,18 @@ O score não progrediu por 3 iterações consecutivas.
 - final_pot: 15
 - winner: 10
 
-#### HL3048: 65/100
+#### HL3048: 72/100
 - table_id: 10
-- board_cards: 15
+- board_cards: 22
 - hole_cards: 0
 - street_sequence: 15
 - final_pot: 15
 - winner: 10
 
-#### HL2332: 80/100
+#### HL2332: 100/100
 - table_id: 10
 - board_cards: 30
-- hole_cards: 0
+- hole_cards: 20
 - street_sequence: 15
 - final_pot: 15
 - winner: 10
