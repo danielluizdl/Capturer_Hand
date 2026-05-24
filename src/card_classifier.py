@@ -150,10 +150,16 @@ def extract_board_cards(table_crop: np.ndarray, n_cards: int) -> list[str]:
     """
     Extrai cartas do board usando posições dos slots.
     n_cards deve ser 3, 4 ou 5.
+    Retorna lista com até n_cards cartas (pode ter menos se algum slot falhar).
+    """
+    slotted = extract_board_cards_slotted(table_crop, n_cards)
+    return [c for c in slotted if c is not None]
 
-    Usa crops distintos para naipe e rank:
-    - Naipe: crop centrado no slot (cor HSV confiável)
-    - Rank:  crop deslocado 25px para a esquerda (rank está no top-left da carta)
+
+def extract_board_cards_slotted(table_crop: np.ndarray, n_cards: int) -> list[str | None]:
+    """
+    Como extract_board_cards, mas retorna lista de tamanho n_cards com None
+    em slots onde a detecção falhou. Permite votação independente por slot.
     """
     if n_cards not in (3, 4, 5):
         return []
@@ -163,10 +169,9 @@ def extract_board_cards(table_crop: np.ndarray, n_cards: int) -> list[str]:
     y2  = int(h * CARD_Y2_F)
     hw  = int(w * CLASSIFY_HW_F)
 
-    # Offset em pixels: rank fica ~25px à esquerda do centro do slot
     RANK_LEFT_SHIFT = 25
 
-    cards: list[str] = []
+    result: list[str | None] = [None] * n_cards
     for i in range(n_cards):
         cx  = int(w * SLOT_X[i])
 
@@ -185,9 +190,9 @@ def extract_board_cards(table_crop: np.ndarray, n_cards: int) -> list[str]:
         rank = detect_rank(rank_crop)
 
         if rank:
-            cards.append(rank + suit)
+            result[i] = rank + suit
 
-    return cards
+    return result
 
 
 def extract_hole_cards(table_crop: np.ndarray) -> list[str]:

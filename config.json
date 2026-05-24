@@ -32,5 +32,7 @@
     860
   ],
   "pot_diff_thr": 4.0,
-  "action_bar_top_f": 0.9
+  "action_bar_top_f": 0.9,
+  "spades_v_threshold": 90,
+  "classify_hw_f": 0.028
 }

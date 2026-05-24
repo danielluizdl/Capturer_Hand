@@ -10,6 +10,7 @@ from src.gabarito_parser import HandHistory
 from src.video_pipeline import TableEvent
 from src.detectors import crop_table
 from src.ocr_engine import ocr_title_bar, ocr_pot, ocr_board_cards, ocr_hole_cards, ocr_winner
+from src.card_classifier import extract_board_cards_slotted
 
 # 1 BB = $0.10 nas stakes $0.05/$0.10/$0.20 do vídeo de teste
 BB_TO_USD = 0.10
@@ -171,6 +172,45 @@ def _detect_streets(seg: list[TableEvent]) -> list[str]:
     return streets
 
 
+def _vote_slots_for_event(
+    ev,
+    n: int,
+    tid: int,
+    video_path: str,
+    extra_frames: list[int],
+) -> tuple[list[str | None], int]:
+    """
+    Vota por maioria em cada slot para um board_change event.
+    Retorna (slotted_result, new_card_votes) onde:
+      - slotted_result[i] é None se o slot não teve votos
+      - new_card_votes = votos da carta vencedora no último slot (novo card)
+    """
+    slot_votes: list[Counter] = [Counter() for _ in range(n)]
+
+    for offset in extra_frames:
+        fi = ev.frame_idx + offset
+        frame = _get_frame(video_path, fi)
+        if frame is None:
+            continue
+        crop = crop_table(frame, tid)
+        slotted = extract_board_cards_slotted(crop, n)
+        for i, card in enumerate(slotted):
+            if card is not None:
+                slot_votes[i][card] += 1
+
+    result: list[str | None] = []
+    for i in range(n):
+        if slot_votes[i]:
+            best = slot_votes[i].most_common(1)[0][0]
+            result.append(best)
+        else:
+            result.append(None)
+
+    # Usa votos do último slot (nova carta) como indicador de confiança
+    new_card_votes = slot_votes[n - 1].most_common(1)[0][1] if slot_votes[n - 1] else 0
+    return result, new_card_votes
+
+
 def _extract_board(
     tid: int,
     seg: list[TableEvent],
@@ -178,16 +218,12 @@ def _extract_board(
 ) -> list[str]:
     """
     Extrai cartas do board via classificador cor+OCR.
-    Tenta múltiplos frames por street e usa votação por maioria de naipe
-    para resistir a frames de transição/animação.
+    Estratégias:
+    1. Votação por slot independente (não requer todos n cartas por frame).
+    2. Tenta TODOS os board_change events por street; usa o de maior confiança
+       no último slot (a nova carta adicionada naquela street).
+    3. Preenche slots ausentes de streets anteriores (ex: Qs do flop no turn).
     """
-    board: list[str] = []
-    detected: dict[str, list[str]] = {}
-
-    cap_info = cv2.VideoCapture(video_path)
-    native_fps = cap_info.get(cv2.CAP_PROP_FPS)
-    cap_info.release()
-    # Tenta até 5 frames após o board_change event (1s a 30fps)
     EXTRA_FRAMES = [0, 3, 6, 9, 15]
 
     board_changes = sorted(
@@ -195,47 +231,52 @@ def _extract_board(
         key=lambda e: e.timestamp,
     )
 
+    # Para cada street, guarda (slotted_result, new_card_votes) do melhor evento
+    street_best: dict[str, tuple[list[str | None], int]] = {}
+
     for ev in board_changes:
         n = ev.board_cards
         street = {3: "flop", 4: "turn", 5: "river"}.get(n)
-        if not street or street in detected:
+        if not street:
             continue
 
-        # Coleta candidatos de múltiplos frames
-        slot_votes: list[Counter] = [Counter() for _ in range(n)]
+        slotted, new_card_votes = _vote_slots_for_event(ev, n, tid, video_path, EXTRA_FRAMES)
+        prev_votes = street_best.get(street, (None, -1))[1]
+        if new_card_votes > prev_votes:
+            street_best[street] = (slotted, new_card_votes)
 
-        for offset in EXTRA_FRAMES:
-            fi = ev.frame_idx + offset
-            frame = _get_frame(video_path, fi)
-            if frame is None:
-                continue
-            crop = crop_table(frame, tid)
-            cards = ocr_board_cards(crop, n)
-            if len(cards) == n:
-                for i, card in enumerate(cards):
-                    slot_votes[i][card] += 1
+    # flop: slots 0-2
+    flop_cards: list[str | None] = [None, None, None]
+    if "flop" in street_best:
+        flop_cards = street_best["flop"][0][:3]
 
-        # Usa a carta mais votada em cada slot (se disponível)
-        voted: list[str] = []
-        for i in range(n):
-            if slot_votes[i]:
-                best = slot_votes[i].most_common(1)[0][0]
-                voted.append(best)
+    # turn: slot 3; herda flop para slots 0-2 ausentes
+    turn_card: str | None = None
+    if "turn" in street_best:
+        slotted4 = street_best["turn"][0]
+        turn_card = slotted4[3] if len(slotted4) > 3 else None
+        # herança: flop cards em slots ausentes
+        for i in range(3):
+            if flop_cards[i] is None and slotted4[i] is not None:
+                flop_cards[i] = slotted4[i]
 
-        if len(voted) == n:
-            if n == 3:
-                detected["flop"] = voted[:3]
-            elif n == 4:
-                detected["flop"] = voted[:3]
-                detected["turn"] = [voted[3]]
-            elif n == 5:
-                detected["flop"]  = voted[:3]
-                detected["turn"]  = [voted[3]]
-                detected["river"] = [voted[4]]
+    # river: slot 4; herda flop/turn para slots 0-3 ausentes
+    river_card: str | None = None
+    if "river" in street_best:
+        slotted5 = street_best["river"][0]
+        river_card = slotted5[4] if len(slotted5) > 4 else None
+        for i in range(3):
+            if flop_cards[i] is None and slotted5[i] is not None:
+                flop_cards[i] = slotted5[i]
+        if turn_card is None and len(slotted5) > 3 and slotted5[3] is not None:
+            turn_card = slotted5[3]
 
-    for street in ("flop", "turn", "river"):
-        if street in detected:
-            board.extend(detected[street])
+    # Monta board final
+    board: list[str] = [c for c in flop_cards if c]
+    if turn_card:
+        board.append(turn_card)
+    if river_card:
+        board.append(river_card)
 
     return board
 
