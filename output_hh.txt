@@ -1,0 +1,40 @@
+PokerStars Hand #900001: Hold'em No Limit ($0.05/$0.1/$0.2(0.05)) - 2026/05/21 00:00:00 ET
+Table 'HL3458' 8-max Seat #0 is the button
+*** HOLE CARDS ***
+*** FLOP *** [9c 5h Ah]
+*** TURN *** [9c 5h Ah] [4d]
+*** SUMMARY ***
+Total pot $6.49 | Rake $0.00
+Board [9c 5h Ah 4d]
+
+PokerStars Hand #900002: Hold'em No Limit ($0.05/$0.1/$0.2(0.05)) - 2026/05/21 00:00:00 ET
+Table 'HL4017' 8-max Seat #0 is the button
+*** HOLE CARDS ***
+Dealt to dLzinN [9s 4s]
+*** FLOP *** [Jd 5s 2h]
+*** TURN *** [Jd 5s 2h] [5d]
+*** RIVER *** [Jd 5s 2h] [5d] [7s]
+taymonkha collected $2.15 from pot
+*** SUMMARY ***
+Total pot $2.15 | Rake $0.00
+Board [Jd 5s 2h 5d 7s]
+
+PokerStars Hand #900003: Hold'em No Limit ($0.05/$0.1/$0.2(0.05)) - 2026/05/21 00:00:00 ET
+Table 'HL2332' 8-max Seat #0 is the button
+*** HOLE CARDS ***
+*** FLOP *** [5h Qs 8d]
+*** TURN *** [5h Qs 8d] [Kh]
+dLzinN collected $4.71 from pot
+*** SUMMARY ***
+Total pot $4.71 | Rake $0.00
+Board [5h Qs 8d Kh]
+
+PokerStars Hand #900004: Hold'em No Limit ($0.05/$0.1/$0.2(0.05)) - 2026/05/21 00:00:00 ET
+Table 'HL3048' 8-max Seat #0 is the button
+*** HOLE CARDS ***
+*** FLOP *** [Kd Ad Ad]
+*** TURN *** [Kd Ad Ad] [As]
+Hamster813 collected $11.40 from pot
+*** SUMMARY ***
+Total pot $11.40 | Rake $0.00
+Board [Kd Ad Ad As]
