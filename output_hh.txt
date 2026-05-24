@@ -22,6 +22,7 @@ Board [Jd 5s 2h 5d 7s]
 PokerStars Hand #900003: Hold'em No Limit ($0.05/$0.1/$0.2(0.05)) - 2026/05/21 00:00:00 ET
 Table 'HL2332' 8-max Seat #0 is the button
 *** HOLE CARDS ***
+Dealt to dLzinN [Ah Ad]
 *** FLOP *** [5h Qs 8d]
 *** TURN *** [5h Qs 8d] [Kh]
 dLzinN collected $4.71 from pot
@@ -32,9 +33,9 @@ Board [5h Qs 8d Kh]
 PokerStars Hand #900004: Hold'em No Limit ($0.05/$0.1/$0.2(0.05)) - 2026/05/21 00:00:00 ET
 Table 'HL3048' 8-max Seat #0 is the button
 *** HOLE CARDS ***
-*** FLOP *** [Kd Ad Ad]
-*** TURN *** [Kd Ad Ad] [As]
+*** FLOP *** [Kd Ad 9d]
+*** TURN *** [Kd Ad 9d] [As]
 Hamster813 collected $11.40 from pot
 *** SUMMARY ***
 Total pot $11.40 | Rake $0.00
-Board [Kd Ad Ad As]
+Board [Kd Ad 9d As]
