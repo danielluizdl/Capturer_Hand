@@ -1,6 +1,7 @@
 """Task 5 — converte TableEvent em HandHistory detectado."""
 from __future__ import annotations
 import cv2
+import multiprocessing
 import numpy as np
 from collections import Counter
 from dataclasses import dataclass, field
@@ -87,6 +88,8 @@ def _process_table_worker(args: tuple) -> list:
     if not ev_list:
         return []
     hand_segs = _segment_hands(ev_list)
+    # Sort ascending so strongest (most streets) is last → scorer picks it
+    hand_segs = sorted(hand_segs, key=_seg_score)
     needed = _collect_frame_indices(tid, hand_segs, all_evs, native_fps)
     frames_cache = _read_frames_sequential(video_path, needed)
     result = []
@@ -109,28 +112,30 @@ def build_hands(
     """
     Converte eventos do pipeline em objetos HandHistory detectados.
     Retorna TODAS as mãos que alcançaram pelo menos o flop.
+    Processa as 4 mesas em paralelo via multiprocessing.Pool.
     """
     cap_info = cv2.VideoCapture(video_path)
     native_fps = cap_info.get(cv2.CAP_PROP_FPS)
     cap_info.release()
 
     all_evs = [ev for ev_list in events.values() for ev in ev_list]
+
+    args_list = [
+        (tid, ev_list, all_evs, video_path, native_fps)
+        for tid, ev_list in events.items()
+        if ev_list
+    ]
+
+    if not args_list:
+        return []
+
+    n_workers = min(len(args_list), multiprocessing.cpu_count())
+    with multiprocessing.Pool(processes=n_workers) as pool:
+        table_results = pool.map(_process_table_worker, args_list)
+
     result: list[HandHistory] = []
-
-    for tid, ev_list in events.items():
-        if not ev_list:
-            continue
-        hand_segs = _segment_hands(ev_list)
-        # Sort ascending by completeness so the strongest hand is last;
-        # scorer keeps the last detected hand per table_id.
-        hand_segs = sorted(hand_segs, key=_seg_score)
-        needed = _collect_frame_indices(tid, hand_segs, all_evs, native_fps)
-        frames_cache = _read_frames_sequential(video_path, needed)
-        for seg in hand_segs:
-            hand = _build_hand_for_segment(tid, seg, all_evs, frames_cache, native_fps)
-            if hand:
-                result.append(hand)
-
+    for hands in table_results:
+        result.extend(hands)
     return result
 
 
