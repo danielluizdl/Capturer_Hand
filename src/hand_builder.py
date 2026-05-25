@@ -22,7 +22,7 @@ def build_hands(
 ) -> list[HandHistory]:
     """
     Converte eventos do pipeline em objetos HandHistory detectados.
-    Para cada mesa, detecta a mão com mais streets (a do gabarito).
+    Retorna TODAS as mãos que alcançaram pelo menos o flop.
     """
     result: list[HandHistory] = []
 
@@ -30,17 +30,12 @@ def build_hands(
         if not ev_list:
             continue
 
-        # Segmenta em mãos separadas
         hand_segs = _segment_hands(ev_list)
 
-        # Escolhe a mão mais completa (maior nro de streets)
-        best_seg = _pick_best_hand(hand_segs)
-        if not best_seg:
-            continue
-
-        hand = _build_hand_for_segment(tid, best_seg, ev_list, video_path)
-        if hand:
-            result.append(hand)
+        for seg in hand_segs:
+            hand = _build_hand_for_segment(tid, seg, ev_list, video_path)
+            if hand:
+                result.append(hand)
 
     return result
 
