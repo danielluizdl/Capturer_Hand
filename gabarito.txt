@@ -99,10 +99,10 @@ FishGeorge: checks
 Hamster813: bets $5.72
 FishGeorge: folds
 Uncalled bet ($5.72) returned to Hamster813
-Hamster813 collected $11.38 from pot
+Hamster813 collected $11.4 from pot
 Hamster813: doesn't show hand
 *** SUMMARY ***
-Total pot $11.38 | Rake $0.00
+Total pot $11.4 | Rake $0.00
 Board [Kd Ad 9d 8d]
 Seat 1: dLzinN folded before Flop (didn't bet)
 Seat 2: Hamster813 collected ($11.38)
