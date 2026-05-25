@@ -16,6 +16,92 @@ from src.card_classifier import extract_board_cards_slotted
 BB_TO_USD = 0.10
 
 
+def _read_frames_sequential(
+    video_path: str,
+    frame_indices: list[int],
+) -> dict[int, np.ndarray]:
+    if not frame_indices:
+        return {}
+    sorted_indices = sorted(set(frame_indices))
+    cache: dict[int, np.ndarray] = {}
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return {}
+    current = 0
+    for target in sorted_indices:
+        if target < current:
+            continue
+        while current < target:
+            cap.grab()
+            current += 1
+        ret, frame = cap.read()
+        if ret:
+            cache[target] = frame
+        current += 1
+    cap.release()
+    return cache
+
+
+def _collect_frame_indices(
+    tid: int,
+    hand_segs: list[list[TableEvent]],
+    all_evs: list[TableEvent],
+    native_fps: float,
+) -> list[int]:
+    EXTRA_FRAMES = [0, 3, 6, 9, 15]
+    indices: set[int] = set()
+    for seg in hand_segs:
+        sorted_seg = sorted(seg, key=lambda e: e.timestamp)
+        if sorted_seg:
+            indices.add(sorted_seg[0].frame_idx)
+        for ev in seg:
+            if ev.event_type == "board_change" and ev.board_cards in (3, 4, 5):
+                for offset in EXTRA_FRAMES:
+                    indices.add(ev.frame_idx + offset)
+        active = sorted([e for e in seg if e.board_cards > 0], key=lambda e: e.timestamp)
+        for ev in (active[-5:] if len(active) >= 5 else active):
+            indices.add(ev.frame_idx)
+        preflop = sorted([e for e in seg if e.board_cards == 0], key=lambda e: e.timestamp)[:5]
+        early_board = sorted([e for e in seg if e.board_cards in (3, 4)], key=lambda e: e.timestamp)[:3]
+        for ev in preflop + early_board:
+            indices.add(ev.frame_idx)
+        if not seg:
+            continue
+        seg_end_ts = max(e.timestamp for e in seg)
+        future_new_hands = sorted(
+            [e for e in all_evs if e.table_idx == tid and e.event_type == "new_hand" and e.timestamp > seg_end_ts],
+            key=lambda e: e.timestamp,
+        )
+        next_new_hand_ts = future_new_hands[0].timestamp if future_new_hands else seg_end_ts + 20.0
+        search_start = max(0.0, seg_end_ts - 3.0)
+        search_end = min(next_new_hand_ts + 3.0, seg_end_ts + 30.0)
+        t = search_start
+        while t <= search_end:
+            indices.add(int(t * native_fps))
+            t += 1.0
+    return list(indices)
+
+
+def _process_table_worker(args: tuple) -> list:
+    tid, ev_list, all_evs, video_path, native_fps = args
+    if not ev_list:
+        return []
+    hand_segs = _segment_hands(ev_list)
+    needed = _collect_frame_indices(tid, hand_segs, all_evs, native_fps)
+    frames_cache = _read_frames_sequential(video_path, needed)
+    result = []
+    for seg in hand_segs:
+        hand = _build_hand_for_segment(tid, seg, all_evs, frames_cache, native_fps)
+        if hand:
+            result.append(hand)
+    return result
+
+
+def _seg_score(seg: list[TableEvent]) -> int:
+    boards = {e.board_cards for e in seg}
+    return (3 in boards) * 10 + (4 in boards) * 5 + (5 in boards) * 3 + len(seg)
+
+
 def build_hands(
     events: dict[int, list[TableEvent]],
     video_path: str,
@@ -24,16 +110,24 @@ def build_hands(
     Converte eventos do pipeline em objetos HandHistory detectados.
     Retorna TODAS as mãos que alcançaram pelo menos o flop.
     """
+    cap_info = cv2.VideoCapture(video_path)
+    native_fps = cap_info.get(cv2.CAP_PROP_FPS)
+    cap_info.release()
+
+    all_evs = [ev for ev_list in events.values() for ev in ev_list]
     result: list[HandHistory] = []
 
     for tid, ev_list in events.items():
         if not ev_list:
             continue
-
         hand_segs = _segment_hands(ev_list)
-
+        # Sort ascending by completeness so the strongest hand is last;
+        # scorer keeps the last detected hand per table_id.
+        hand_segs = sorted(hand_segs, key=_seg_score)
+        needed = _collect_frame_indices(tid, hand_segs, all_evs, native_fps)
+        frames_cache = _read_frames_sequential(video_path, needed)
         for seg in hand_segs:
-            hand = _build_hand_for_segment(tid, seg, ev_list, video_path)
+            hand = _build_hand_for_segment(tid, seg, all_evs, frames_cache, native_fps)
             if hand:
                 result.append(hand)
 
@@ -81,7 +175,6 @@ def _pick_best_hand(segs: list[list[TableEvent]]) -> list[TableEvent] | None:
 
     for seg in segs:
         boards_seen = set(e.board_cards for e in seg)
-        # Penaliza segmentos sem flop
         has_flop  = 3 in boards_seen
         has_turn  = 4 in boards_seen
         has_river = 5 in boards_seen
@@ -105,14 +198,15 @@ def _build_hand_for_segment(
     tid: int,
     seg: list[TableEvent],
     all_evs: list[TableEvent],
-    video_path: str,
+    frames_cache: dict[int, np.ndarray],
+    native_fps: float,
 ) -> Optional[HandHistory]:
     """Constrói HandHistory para um segmento de eventos de uma mão."""
 
     table_id = seg[0].table_id
 
     # Confirma table_id via OCR no primeiro frame do segmento
-    frame0 = _get_frame(video_path, seg[0].frame_idx)
+    frame0 = frames_cache.get(seg[0].frame_idx)
     if frame0 is not None:
         crop0 = crop_table(frame0, tid)
         detected_id = ocr_title_bar(crop0)
@@ -123,16 +217,16 @@ def _build_hand_for_segment(
     streets = _detect_streets(seg)
 
     # Board cards via OCR nos frames de transição
-    board = _extract_board(tid, seg, video_path)
+    board = _extract_board(tid, seg, frames_cache)
 
     # Pot final: max OCR dentro do tempo da mão
-    total_pot = _extract_final_pot(tid, seg, video_path)
+    total_pot = _extract_final_pot(tid, seg, frames_cache)
 
     # Hole cards
-    hole_cards = _extract_hole_cards(tid, seg, video_path)
+    hole_cards = _extract_hole_cards(tid, seg, frames_cache)
 
     # Vencedor
-    winner = _extract_winner(tid, seg, all_evs, video_path)
+    winner = _extract_winner(tid, seg, all_evs, frames_cache, native_fps)
 
     pot_by_street = {s: total_pot for s in streets[1:] if total_pot}
 
@@ -171,7 +265,7 @@ def _vote_slots_for_event(
     ev,
     n: int,
     tid: int,
-    video_path: str,
+    frames_cache: dict[int, np.ndarray],
     extra_frames: list[int],
 ) -> tuple[list[str | None], int]:
     """
@@ -184,7 +278,7 @@ def _vote_slots_for_event(
 
     for offset in extra_frames:
         fi = ev.frame_idx + offset
-        frame = _get_frame(video_path, fi)
+        frame = frames_cache.get(fi)
         if frame is None:
             continue
         crop = crop_table(frame, tid)
@@ -209,7 +303,7 @@ def _vote_slots_for_event(
 def _extract_board(
     tid: int,
     seg: list[TableEvent],
-    video_path: str,
+    frames_cache: dict[int, np.ndarray],
 ) -> list[str]:
     """
     Extrai cartas do board via classificador cor+OCR.
@@ -235,7 +329,7 @@ def _extract_board(
         if not street:
             continue
 
-        slotted, new_card_votes = _vote_slots_for_event(ev, n, tid, video_path, EXTRA_FRAMES)
+        slotted, new_card_votes = _vote_slots_for_event(ev, n, tid, frames_cache, EXTRA_FRAMES)
         prev_votes = street_best.get(street, (None, -1))[1]
         if new_card_votes > prev_votes:
             street_best[street] = (slotted, new_card_votes)
@@ -279,7 +373,7 @@ def _extract_board(
 def _extract_final_pot(
     tid: int,
     seg: list[TableEvent],
-    video_path: str,
+    frames_cache: dict[int, np.ndarray],
 ) -> Optional[float]:
     """
     Extrai o pot final em USD.
@@ -295,7 +389,7 @@ def _extract_final_pot(
 
     pots: list[float] = []
     for ev in candidates[:5]:
-        frame = _get_frame(video_path, ev.frame_idx)
+        frame = frames_cache.get(ev.frame_idx)
         if frame is None:
             continue
         crop = crop_table(frame, tid)
@@ -309,7 +403,7 @@ def _extract_final_pot(
 def _extract_hole_cards(
     tid: int,
     seg: list[TableEvent],
-    video_path: str,
+    frames_cache: dict[int, np.ndarray],
 ) -> list[str]:
     """
     Tenta extrair hole cards do herói.
@@ -327,7 +421,7 @@ def _extract_hole_cards(
     )[:3]
 
     for ev in preflop + early_board:
-        frame = _get_frame(video_path, ev.frame_idx)
+        frame = frames_cache.get(ev.frame_idx)
         if frame is None:
             continue
         crop = crop_table(frame, tid)
@@ -342,16 +436,13 @@ def _extract_winner(
     tid: int,
     seg: list[TableEvent],
     all_evs: list[TableEvent],
-    video_path: str,
+    frames_cache: dict[int, np.ndarray],
+    native_fps: float,
 ) -> Optional[str]:
     """
     Detecta o vencedor buscando o badge 'WINNER'.
     Usa next_new_hand de all_evs para cobrir o "dead zone" após o último evento do segmento.
     """
-    cap_info = cv2.VideoCapture(video_path)
-    native_fps = cap_info.get(cv2.CAP_PROP_FPS)
-    cap_info.release()
-
     seg_end_ts = max(e.timestamp for e in seg)
 
     # Próximo new_hand APÓS o fim do segmento (em qualquer mesa)
@@ -371,7 +462,7 @@ def _extract_winner(
     t = search_start
     while t <= search_end:
         fi = int(t * native_fps)
-        frame = _get_frame(video_path, fi)
+        frame = frames_cache.get(fi)
         if frame is not None:
             crop = crop_table(frame, tid)
             winner = ocr_winner(crop)
