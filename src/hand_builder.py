@@ -17,19 +17,27 @@ from src.card_classifier import extract_board_cards_slotted
 BB_TO_USD = 0.10
 
 
-def _read_frames_sequential(
+def _read_and_crop_all_tables(
     video_path: str,
-    frame_indices: list[int],
-) -> dict[int, np.ndarray]:
-    if not frame_indices:
-        return {}
-    sorted_indices = sorted(set(frame_indices))
-    cache: dict[int, np.ndarray] = {}
+    per_table_needed: dict[int, set[int]],
+) -> dict[int, dict[int, np.ndarray]]:
+    """
+    Faz UMA passagem sequencial no vídeo e coleta crops por mesa.
+    per_table_needed[tid] = set de frame_indices necessários para a mesa tid.
+    Retorna per_table_crops[tid][frame_idx] = crop_ndarray.
+    """
+    all_indices = sorted(set().union(*per_table_needed.values()))
+    if not all_indices:
+        return {tid: {} for tid in per_table_needed}
+
+    per_table_crops: dict[int, dict[int, np.ndarray]] = {tid: {} for tid in per_table_needed}
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        return {}
+        return per_table_crops
+
     current = 0
-    for target in sorted_indices:
+    for target in all_indices:
         if target < current:
             continue
         while current < target:
@@ -37,10 +45,13 @@ def _read_frames_sequential(
             current += 1
         ret, frame = cap.read()
         if ret:
-            cache[target] = frame
+            for tid, needed in per_table_needed.items():
+                if target in needed:
+                    per_table_crops[tid][target] = crop_table(frame, tid)
         current += 1
+
     cap.release()
-    return cache
+    return per_table_crops
 
 
 def _collect_frame_indices(
@@ -48,7 +59,7 @@ def _collect_frame_indices(
     hand_segs: list[list[TableEvent]],
     all_evs: list[TableEvent],
     native_fps: float,
-) -> list[int]:
+) -> set[int]:
     EXTRA_FRAMES = [0, 3, 6, 9, 15]
     indices: set[int] = set()
     for seg in hand_segs:
@@ -80,20 +91,22 @@ def _collect_frame_indices(
         while t <= search_end:
             indices.add(int(t * native_fps))
             t += 1.0
-    return list(indices)
+    return indices
 
 
-def _process_table_worker(args: tuple) -> list:
-    tid, ev_list, all_evs, video_path, native_fps = args
+def _process_table_ocr_worker(args: tuple) -> list:
+    """
+    Worker que processa UMA mesa usando crops já extraídos (sem I/O de vídeo).
+    args = (tid, ev_list, all_evs, frames_cache, native_fps)
+    onde frames_cache[frame_idx] = crop_ndarray (já recortado para esta mesa)
+    """
+    tid, ev_list, all_evs, frames_cache, native_fps = args
     if not ev_list:
         return []
     new_hand_evs = sum(1 for e in ev_list if e.event_type == "new_hand")
     hand_segs = _segment_hands(ev_list)
     print(f"  [mesa {tid}] eventos={len(ev_list)} new_hand={new_hand_evs} segmentos={len(hand_segs)}", flush=True)
-    # Sort ascending so strongest (most streets) is last → scorer picks it
     hand_segs = sorted(hand_segs, key=_seg_score)
-    needed = _collect_frame_indices(tid, hand_segs, all_evs, native_fps)
-    frames_cache = _read_frames_sequential(video_path, needed)
     result = []
     for seg in hand_segs:
         hand = _build_hand_for_segment(tid, seg, all_evs, frames_cache, native_fps)
@@ -112,9 +125,9 @@ def build_hands(
     video_path: str,
 ) -> list[HandHistory]:
     """
-    Converte eventos do pipeline em objetos HandHistory detectados.
-    Retorna TODAS as mãos que alcançaram pelo menos o flop.
-    Processa as 4 mesas em paralelo via multiprocessing.Pool.
+    Fase 1: coleta frame indices de todas as mesas.
+    Fase 2: UMA passagem sequencial no vídeo → crops por mesa.
+    Fase 3: workers paralelos fazem apenas OCR (sem I/O).
     """
     cap_info = cv2.VideoCapture(video_path)
     native_fps = cap_info.get(cv2.CAP_PROP_FPS)
@@ -122,18 +135,37 @@ def build_hands(
 
     all_evs = [ev for ev_list in events.values() for ev in ev_list]
 
-    args_list = [
-        (tid, ev_list, all_evs, video_path, native_fps)
-        for tid, ev_list in events.items()
-        if ev_list
-    ]
+    # Fase 1: determina frames necessários por mesa
+    per_table_segs: dict[int, list] = {}
+    per_table_needed: dict[int, set[int]] = {}
+    for tid, ev_list in events.items():
+        if not ev_list:
+            continue
+        segs = sorted(_segment_hands(ev_list), key=_seg_score)
+        per_table_segs[tid] = segs
+        per_table_needed[tid] = _collect_frame_indices(tid, segs, all_evs, native_fps)
 
-    if not args_list:
+    if not per_table_needed:
         return []
 
-    n_workers = min(len(args_list), multiprocessing.cpu_count())
-    with multiprocessing.Pool(processes=n_workers) as pool:
-        table_results = pool.map(_process_table_worker, args_list)
+    # Fase 2: UMA passagem sequencial para todas as mesas
+    total_crops = sum(len(v) for v in per_table_needed.values())
+    print(f"  Extraindo frames: {total_crops} crops em 1 passagem...")
+    per_table_crops = _read_and_crop_all_tables(video_path, per_table_needed)
+
+    # Fase 3: OCR paralelo por mesa (sem I/O)
+    worker_args = [
+        (tid, events[tid], all_evs, per_table_crops[tid], native_fps)
+        for tid in per_table_segs
+    ]
+
+    try:
+        n_workers = min(len(worker_args), multiprocessing.cpu_count())
+        with multiprocessing.Pool(processes=n_workers) as pool:
+            table_results = pool.map(_process_table_ocr_worker, worker_args)
+    except Exception as e:
+        print(f"  Pool falhou ({e}), rodando sequencial...")
+        table_results = [_process_table_ocr_worker(args) for args in worker_args]
 
     result: list[HandHistory] = []
     for hands in table_results:
@@ -213,9 +245,9 @@ def _build_hand_for_segment(
     table_id = seg[0].table_id
 
     # Confirma table_id via OCR no primeiro frame do segmento
-    frame0 = frames_cache.get(seg[0].frame_idx)
-    if frame0 is not None:
-        crop0 = crop_table(frame0, tid)
+    # frames_cache contém crops já recortados para esta mesa
+    crop0 = frames_cache.get(seg[0].frame_idx)
+    if crop0 is not None:
         detected_id = ocr_title_bar(crop0)
         if detected_id:
             table_id = detected_id
@@ -271,12 +303,12 @@ def _detect_streets(seg: list[TableEvent]) -> list[str]:
 def _vote_slots_for_event(
     ev,
     n: int,
-    tid: int,
     frames_cache: dict[int, np.ndarray],
     extra_frames: list[int],
 ) -> tuple[list[str | None], int]:
     """
     Vota por maioria em cada slot para um board_change event.
+    frames_cache contém crops já recortados para a mesa correspondente.
     Retorna (slotted_result, new_card_votes) onde:
       - slotted_result[i] é None se o slot não teve votos
       - new_card_votes = votos da carta vencedora no último slot (novo card)
@@ -285,10 +317,9 @@ def _vote_slots_for_event(
 
     for offset in extra_frames:
         fi = ev.frame_idx + offset
-        frame = frames_cache.get(fi)
-        if frame is None:
+        crop = frames_cache.get(fi)
+        if crop is None:
             continue
-        crop = crop_table(frame, tid)
         slotted = extract_board_cards_slotted(crop, n)
         for i, card in enumerate(slotted):
             if card is not None:
@@ -336,7 +367,7 @@ def _extract_board(
         if not street:
             continue
 
-        slotted, new_card_votes = _vote_slots_for_event(ev, n, tid, frames_cache, EXTRA_FRAMES)
+        slotted, new_card_votes = _vote_slots_for_event(ev, n, frames_cache, EXTRA_FRAMES)
         prev_votes = street_best.get(street, (None, -1))[1]
         if new_card_votes > prev_votes:
             street_best[street] = (slotted, new_card_votes)
@@ -396,10 +427,9 @@ def _extract_final_pot(
 
     pots: list[float] = []
     for ev in candidates[:5]:
-        frame = frames_cache.get(ev.frame_idx)
-        if frame is None:
+        crop = frames_cache.get(ev.frame_idx)
+        if crop is None:
             continue
-        crop = crop_table(frame, tid)
         pot_bb = ocr_pot(crop)
         if pot_bb and pot_bb > 0:
             pots.append(pot_bb * BB_TO_USD)
@@ -428,10 +458,9 @@ def _extract_hole_cards(
     )[:3]
 
     for ev in preflop + early_board:
-        frame = frames_cache.get(ev.frame_idx)
-        if frame is None:
+        crop = frames_cache.get(ev.frame_idx)
+        if crop is None:
             continue
-        crop = crop_table(frame, tid)
         cards = ocr_hole_cards(crop)
         if len(cards) >= 2:
             return cards[:2]
@@ -469,9 +498,8 @@ def _extract_winner(
     t = search_start
     while t <= search_end:
         fi = int(t * native_fps)
-        frame = frames_cache.get(fi)
-        if frame is not None:
-            crop = crop_table(frame, tid)
+        crop = frames_cache.get(fi)
+        if crop is not None:
             winner = ocr_winner(crop)
             if winner:
                 return winner
