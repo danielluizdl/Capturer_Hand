@@ -95,17 +95,11 @@ def _collect_frame_indices(
 
 
 def _process_table_ocr_worker(args: tuple) -> list:
-    """
-    Worker que processa UMA mesa usando crops já extraídos (sem I/O de vídeo).
-    args = (tid, ev_list, all_evs, frames_cache, native_fps)
-    onde frames_cache[frame_idx] = crop_ndarray (já recortado para esta mesa)
-    """
+    """Worker que processa UMA mesa usando crops já extraídos (sem I/O de vídeo)."""
     tid, ev_list, all_evs, frames_cache, native_fps = args
     if not ev_list:
         return []
-    new_hand_evs = sum(1 for e in ev_list if e.event_type == "new_hand")
     hand_segs = _segment_hands(ev_list)
-    print(f"  [mesa {tid}] eventos={len(ev_list)} new_hand={new_hand_evs} segmentos={len(hand_segs)}", flush=True)
     hand_segs = sorted(hand_segs, key=_seg_score)
     result = []
     for seg in hand_segs:
@@ -142,6 +136,8 @@ def build_hands(
         if not ev_list:
             continue
         segs = sorted(_segment_hands(ev_list), key=_seg_score)
+        new_hand_evs = sum(1 for e in ev_list if e.event_type == "new_hand")
+        print(f"  [mesa {tid}] eventos={len(ev_list)} new_hand={new_hand_evs} segmentos={len(segs)}", flush=True)
         per_table_segs[tid] = segs
         per_table_needed[tid] = _collect_frame_indices(tid, segs, all_evs, native_fps)
 
@@ -160,8 +156,9 @@ def build_hands(
     ]
 
     try:
+        from multiprocessing.pool import ThreadPool
         n_workers = min(len(worker_args), multiprocessing.cpu_count())
-        with multiprocessing.Pool(processes=n_workers) as pool:
+        with ThreadPool(processes=n_workers) as pool:
             table_results = pool.map(_process_table_ocr_worker, worker_args)
     except Exception as e:
         print(f"  Pool falhou ({e}), rodando sequencial...")
@@ -240,12 +237,13 @@ def _build_hand_for_segment(
     frames_cache: dict[int, np.ndarray],
     native_fps: float,
 ) -> Optional[HandHistory]:
-    """Constrói HandHistory para um segmento de eventos de uma mão."""
+    """Constrói HandHistory para um segmento de eventos de uma mão.
+    frames_cache[frame_idx] = crop já recortado para a mesa tid.
+    """
 
     table_id = seg[0].table_id
 
     # Confirma table_id via OCR no primeiro frame do segmento
-    # frames_cache contém crops já recortados para esta mesa
     crop0 = frames_cache.get(seg[0].frame_idx)
     if crop0 is not None:
         detected_id = ocr_title_bar(crop0)
@@ -303,15 +301,16 @@ def _detect_streets(seg: list[TableEvent]) -> list[str]:
 def _vote_slots_for_event(
     ev,
     n: int,
+    tid: int,
     frames_cache: dict[int, np.ndarray],
     extra_frames: list[int],
 ) -> tuple[list[str | None], int]:
     """
     Vota por maioria em cada slot para um board_change event.
-    frames_cache contém crops já recortados para a mesa correspondente.
     Retorna (slotted_result, new_card_votes) onde:
       - slotted_result[i] é None se o slot não teve votos
       - new_card_votes = votos da carta vencedora no último slot (novo card)
+    frames_cache[frame_idx] = crop já recortado para a mesa tid.
     """
     slot_votes: list[Counter] = [Counter() for _ in range(n)]
 
@@ -367,7 +366,7 @@ def _extract_board(
         if not street:
             continue
 
-        slotted, new_card_votes = _vote_slots_for_event(ev, n, frames_cache, EXTRA_FRAMES)
+        slotted, new_card_votes = _vote_slots_for_event(ev, n, tid, frames_cache, EXTRA_FRAMES)
         prev_votes = street_best.get(street, (None, -1))[1]
         if new_card_votes > prev_votes:
             street_best[street] = (slotted, new_card_votes)
