@@ -87,7 +87,9 @@ def _process_table_worker(args: tuple) -> list:
     tid, ev_list, all_evs, video_path, native_fps = args
     if not ev_list:
         return []
+    new_hand_evs = sum(1 for e in ev_list if e.event_type == "new_hand")
     hand_segs = _segment_hands(ev_list)
+    print(f"  [mesa {tid}] eventos={len(ev_list)} new_hand={new_hand_evs} segmentos={len(hand_segs)}", flush=True)
     # Sort ascending so strongest (most streets) is last → scorer picks it
     hand_segs = sorted(hand_segs, key=_seg_score)
     needed = _collect_frame_indices(tid, hand_segs, all_evs, native_fps)
