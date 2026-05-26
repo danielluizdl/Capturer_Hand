@@ -263,6 +263,12 @@ def main():
 
         apply_config(cfg)
 
+        # Warm-up do OCR (força inicialização e evita latência na 1ª inferência)
+        if iteration == 1:
+            from src.ocr_engine import _ocr
+            import numpy as np
+            _ocr()(np.zeros((64, 64, 3), dtype=np.uint8))
+
         t0 = time.perf_counter()
         try:
             events, detected = run_pipeline(cfg)

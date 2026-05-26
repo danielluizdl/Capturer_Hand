@@ -1,16 +1,45 @@
 """Task 2 — wrapper RapidOCR para layout WPT Global / Nexa Poker."""
 from __future__ import annotations
 import re
+import threading
 import numpy as np
 
 _ocr_instance = None
+_ocr_lock = threading.Lock()
+_USE_GPU = False
+
+
+def _detect_gpu() -> bool:
+    """Retorna True se CUDAExecutionProvider estiver disponível."""
+    try:
+        import onnxruntime as ort
+        available = ort.get_available_providers()
+        has_cuda = "CUDAExecutionProvider" in available
+        if not has_cuda:
+            print(f"[OCR] CUDA não disponível. Providers: {available}")
+        return has_cuda
+    except Exception as e:
+        print(f"[OCR] Erro ao detectar GPU: {e}")
+        return False
 
 
 def _ocr():
-    global _ocr_instance
+    global _ocr_instance, _USE_GPU
     if _ocr_instance is None:
-        from rapidocr_onnxruntime import RapidOCR
-        _ocr_instance = RapidOCR()
+        with _ocr_lock:
+            if _ocr_instance is None:  # double-checked locking
+                from rapidocr_onnxruntime import RapidOCR
+                _USE_GPU = _detect_gpu()
+                if _USE_GPU:
+                    _ocr_instance = RapidOCR(
+                        det_use_cuda=True,
+                        cls_use_cuda=True,
+                        rec_use_cuda=True,
+                    )
+                    print("[OCR] Usando GPU (CUDA)")
+                else:
+                    _ocr_instance = RapidOCR()
+                    print("[OCR] Usando CPU")
     return _ocr_instance
 
 

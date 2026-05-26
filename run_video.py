@@ -47,6 +47,12 @@ def main():
 
     apply_config(cfg)
 
+    # Warm-up do OCR (força inicialização e evita latência na 1ª inferência)
+    from src.ocr_engine import _ocr
+    import numpy as np
+    print("Inicializando OCR...")
+    _ocr()(np.zeros((64, 64, 3), dtype=np.uint8))
+
     from src.video_pipeline import process_video
     from src.hand_builder import build_hands
     from src.hh_writer_ps import write_session
