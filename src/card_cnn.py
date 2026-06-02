@@ -76,6 +76,41 @@ class CardCNN:
         top = probs.topk(3)
         return [(self.classes[i], float(p)) for i,p in zip(top.indices, top.values)]
 
+    def predict_batch(
+        self,
+        imgs_bgr: list[np.ndarray],
+    ) -> list[tuple[str, float]]:
+        """
+        Inferência em batch para múltiplos crops de uma vez.
+        Mais eficiente que chamar predict() N vezes individualmente.
+        Retorna lista de (card, confidence) na mesma ordem de imgs_bgr.
+        """
+        results: list[tuple[str, float]] = []
+        valid_indices: list[int] = []
+        tensors: list = []
+
+        for i, img in enumerate(imgs_bgr):
+            if img is None or img.size == 0:
+                results.append(('', 0.0))
+            else:
+                try:
+                    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    tensors.append(_PRE(rgb))
+                    valid_indices.append(i)
+                    results.append(('', 0.0))  # placeholder
+                except Exception:
+                    results.append(('', 0.0))
+
+        if tensors:
+            batch = torch.stack(tensors).to(self.device)
+            with torch.no_grad():
+                probs = torch.softmax(self.model(batch), dim=1)
+            for j, orig_i in enumerate(valid_indices):
+                idx = int(probs[j].argmax())
+                results[orig_i] = (self.classes[idx], float(probs[j][idx]))
+
+        return results
+
 
 _cnn: CardCNN | None = None
 
