@@ -291,6 +291,10 @@ def _build_hand_for_segment(
     # Valida board: remove duplicatas e colisões com hole cards
     board = _validate_board(board, hole_cards)
 
+    # Normaliza formato das cartas: Rank maiúsculo + suit minúsculo
+    board      = [_norm_card(c) for c in board if _norm_card(c)]
+    hole_cards = [_norm_card(c) for c in hole_cards if _norm_card(c)]
+
     pot_by_street = {s: total_pot for s in streets[1:] if total_pot}
 
     return HandHistory(
@@ -400,6 +404,26 @@ def _detect_button_seat(
                 return seat
 
     return 0
+
+
+_VALID_RANKS_LOW = set("23456789tjqka")
+_VALID_SUITS_LOW = set("cdhs")
+
+
+def _norm_card(card: str) -> str | None:
+    """
+    Normaliza carta para formato PokerStars: Rank maiúsculo + suit minúsculo.
+    Ex: 'ah' -> 'Ah', '9C' -> '9c', 'TS' -> 'Ts'.
+    Retorna None se inválida.
+    """
+    if not card or len(card) != 2:
+        return None
+    rank = card[0].lower()
+    suit = card[1].lower()
+    if rank not in _VALID_RANKS_LOW or suit not in _VALID_SUITS_LOW:
+        return None
+    r_out = rank.upper() if rank in 'tjqka' else rank
+    return r_out + suit
 
 
 def _validate_board(board: list[str], hole_cards: list[str]) -> list[str]:
