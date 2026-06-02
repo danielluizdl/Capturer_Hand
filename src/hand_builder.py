@@ -574,20 +574,32 @@ def _extract_final_pot(
     # Pega os últimos N eventos com board > 0 (final da mão antes de resetar)
     active = sorted([e for e in seg if e.board_cards > 0], key=lambda e: e.timestamp)
 
-    # Tenta a partir do fim (mais provável de ter o pot final)
-    candidates = active[-5:] if len(active) >= 5 else active
-    candidates = list(reversed(candidates))  # do mais recente ao mais antigo
+    # Estratégia dupla:
+    # 1. Últimos N frames da mão (pot mais provável de estar no máximo)
+    # 2. Todos os frames com board para detectar pico (peak tracking)
+    all_pots: list[float] = []
 
-    pots: list[float] = []
-    for ev in candidates[:5]:
+    # Amostra frames distribuídos ao longo da mão com board ativo
+    sample_evs: list = active[-8:] if len(active) >= 8 else active
+    for ev in sample_evs:
         crop = frames_cache.get(ev.frame_idx)
         if crop is None:
             continue
         pot_bb = ocr_pot(crop)
         if pot_bb and pot_bb > 0:
-            pots.append(pot_bb * BB_TO_USD)
+            all_pots.append(pot_bb * BB_TO_USD)
 
-    return max(pots) if pots else None
+    if not all_pots:
+        return None
+
+    # O pot final é o pico (max) durante a mão ativa
+    # Descarta outliers estatísticos: remove valores > 2x a mediana
+    import statistics
+    if len(all_pots) >= 3:
+        med = statistics.median(all_pots)
+        filtered = [p for p in all_pots if p <= med * 2.5]
+        return max(filtered) if filtered else max(all_pots)
+    return max(all_pots)
 
 
 def _extract_hole_cards(
