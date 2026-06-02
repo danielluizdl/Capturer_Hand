@@ -146,18 +146,16 @@ def classify_card(card_crop: np.ndarray) -> str | None:
     Retorna None se naipe ou rank não puderem ser determinados.
 
     Pipeline:
-    1. CNN com conf >= 0.85: aceita direto (alta confiança)
-    2. CNN com conf >= 0.70: verifica naipe via HSV e corrige se diferente
-    3. Fallback: HSV (naipe) + OCR (rank)
+    1. CNN com conf >= 0.80: verifica naipe via HSV (conf < 0.90)
+    2. Fallback: HSV (naipe) + OCR (rank)
     """
     try:
         from src.card_cnn import get_card_cnn
         cnn_card, conf = get_card_cnn().predict(card_crop)
-        if conf >= 0.70 and len(cnn_card) == 2:
+        if conf >= 0.80 and len(cnn_card) == 2:
             cnn_rank = cnn_card[0].upper() if cnn_card[0] in 'tjqka' else cnn_card[0]
             cnn_suit = cnn_card[1]
-            if conf >= 0.85:
-                # Alta confiança: aceita direto
+            if conf >= 0.90:
                 return cnn_rank + cnn_suit
             # Confiança moderada: verifica naipe via HSV
             hsv_suit = detect_suit(card_crop)
@@ -229,13 +227,14 @@ def extract_board_cards_slotted(table_crop: np.ndarray, n_cards: int) -> list[st
         cx = int(w * SLOT_X[i])
         suit_crop = slot_crops[i]
 
-        # Tenta CNN
+        # Tenta CNN (threshold mais alto para board: 0.80)
+        # O board tem fundo decorado que pode confundir CNN treinada em templates limpos
         if cnn_preds is not None and suit_crop is not None:
             cnn_card, conf = cnn_preds[i]
-            if conf >= 0.65 and len(cnn_card) == 2:
+            if conf >= 0.80 and len(cnn_card) == 2:
                 cnn_rank = cnn_card[0].upper() if cnn_card[0] in 'tjqka' else cnn_card[0]
                 if cnn_rank in VALID_RANKS:
-                    if conf < 0.85:
+                    if conf < 0.90:
                         hsv_suit = detect_suit(suit_crop)
                         final_suit = hsv_suit if hsv_suit != "?" else cnn_card[1]
                     else:
@@ -286,14 +285,13 @@ def extract_hole_cards(table_crop: np.ndarray) -> list[str]:
         cnn_x2 = min(w, suit_x2 + CNN_X_EXPAND)
         card_crop = table_crop[y1:y2, cnn_x1:cnn_x2]
 
-        # Tenta CNN
+        # Tenta CNN (threshold 0.75 para hole cards)
         try:
             from src.card_cnn import get_card_cnn
             cnn_card, conf = get_card_cnn().predict(card_crop)
-            if conf >= 0.65 and len(cnn_card) == 2:
+            if conf >= 0.75 and len(cnn_card) == 2:
                 cnn_rank = cnn_card[0].upper() if cnn_card[0] in 'tjqka' else cnn_card[0]
-                # Verifica naipe com HSV se confiança moderada
-                if conf < 0.85:
+                if conf < 0.90:
                     suit_crop = table_crop[y1:y2, suit_x1:suit_x2]
                     hsv_suit = detect_suit(suit_crop)
                     final_suit = hsv_suit if hsv_suit != "?" else cnn_card[1]
