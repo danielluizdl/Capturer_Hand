@@ -162,8 +162,10 @@ def build_hands(
 
 def _segment_hands(ev_list: list[TableEvent]) -> list[list[TableEvent]]:
     """
-    Divide eventos em mãos usando transições board>0 → board=0 como fronteira.
-    Cada segmento contém todos os eventos de uma mão.
+    Divide eventos em mãos usando múltiplos critérios de fronteira:
+    1. Transição board>0 → board=0 com new_hand event (critério original)
+    2. new_hand event com gap de tempo >= 5s (cobre preflop-only hands)
+    3. Gap de silêncio >= 20s entre eventos consecutivos (mãos perdidas)
     """
     sorted_evs = sorted(ev_list, key=lambda e: e.timestamp)
     if not sorted_evs:
@@ -172,20 +174,42 @@ def _segment_hands(ev_list: list[TableEvent]) -> list[list[TableEvent]]:
     hands: list[list[TableEvent]] = []
     current: list[TableEvent] = []
     prev_board = -1
+    prev_ts = sorted_evs[0].timestamp
 
     for ev in sorted_evs:
-        if prev_board > 0 and ev.board_cards == 0 and ev.event_type == "new_hand":
-            # Fim de mão: fecha segmento atual
+        time_gap = ev.timestamp - prev_ts
+        is_new_hand = ev.event_type == "new_hand"
+
+        # Critério 1: board voltou a 0 com new_hand (fim claro de mão)
+        if prev_board > 0 and ev.board_cards == 0 and is_new_hand:
             if current:
                 hands.append(current)
             current = []
+
+        # Critério 2: new_hand com gap de tempo significativo (>=5s)
+        # — captura preflop folds onde board nunca avançou
+        elif is_new_hand and time_gap >= 5.0 and current:
+            has_board = any(e.board_cards > 0 for e in current)
+            # Se segmento atual já tem board, é uma nova mão clara
+            # Se não tem board mas o gap é suficiente, provavelmente é nova mão
+            if has_board or time_gap >= 10.0:
+                hands.append(current)
+                current = []
+
+        # Critério 3: gap de silêncio longo (>=20s) — provável nova mão perdida
+        elif time_gap >= 20.0 and current:
+            hands.append(current)
+            current = []
+
         current.append(ev)
         prev_board = ev.board_cards
+        prev_ts = ev.timestamp
 
     if current:
         hands.append(current)
 
-    return hands
+    # Filtra segmentos vazios ou com apenas 1 evento sem board
+    return [h for h in hands if len(h) > 1 or any(e.board_cards > 0 for e in h)]
 
 
 def _pick_best_hand(segs: list[list[TableEvent]]) -> list[TableEvent] | None:
@@ -302,17 +326,22 @@ def _vote_slots_for_event(
     """
     Vota por maioria em cada slot para um board_change event.
     Retorna (slotted_result, new_card_votes) onde:
-      - slotted_result[i] é None se o slot não teve votos
+      - slotted_result[i] é None se o slot não teve votos suficientes
       - new_card_votes = votos da carta vencedora no último slot (novo card)
     frames_cache[frame_idx] = crop já recortado para a mesa tid.
+
+    Rejeita cartas que aparecem em apenas 1 frame quando há >= 3 frames votando
+    (filtro de outlier para reduzir falsos positivos do OCR).
     """
     slot_votes: list[Counter] = [Counter() for _ in range(n)]
+    frames_tried = 0
 
     for offset in extra_frames:
         fi = ev.frame_idx + offset
         crop = frames_cache.get(fi)
         if crop is None:
             continue
+        frames_tried += 1
         slotted = extract_board_cards_slotted(crop, n)
         for i, card in enumerate(slotted):
             if card is not None:
@@ -320,9 +349,16 @@ def _vote_slots_for_event(
 
     result: list[str | None] = []
     for i in range(n):
-        if slot_votes[i]:
-            best = slot_votes[i].most_common(1)[0][0]
-            result.append(best)
+        if not slot_votes[i]:
+            result.append(None)
+            continue
+        top = slot_votes[i].most_common(2)
+        best_card, best_votes = top[0]
+        # Rejeita se unanimidade mínima não atingida com múltiplos frames
+        # (evita aceitar leitura única espúria)
+        min_votes = 2 if frames_tried >= 3 else 1
+        if best_votes >= min_votes:
+            result.append(best_card)
         else:
             result.append(None)
 
@@ -541,23 +577,25 @@ def _extract_winner(
 ) -> Optional[str]:
     """
     Detecta o vencedor buscando o badge 'WINNER'.
-    Usa next_new_hand de all_evs para cobrir o "dead zone" após o último evento do segmento.
+    Usa votação por maioria entre todos os frames da janela pos-mao
+    para robustez a falsos positivos do OCR.
     """
     seg_end_ts = max(e.timestamp for e in seg)
 
-    # Próximo new_hand APÓS o fim do segmento (em qualquer mesa)
     future_new_hands = sorted(
-        [e for e in all_evs if e.table_idx == tid and e.event_type == "new_hand" and e.timestamp > seg_end_ts],
+        [e for e in all_evs if e.table_idx == tid
+         and e.event_type == "new_hand" and e.timestamp > seg_end_ts],
         key=lambda e: e.timestamp,
     )
-    if future_new_hands:
-        next_new_hand_ts = future_new_hands[0].timestamp
-    else:
-        next_new_hand_ts = seg_end_ts + 20.0
+    next_new_hand_ts = (
+        future_new_hands[0].timestamp if future_new_hands else seg_end_ts + 20.0
+    )
 
     search_start = max(0.0, seg_end_ts - 3.0)
     search_end = min(next_new_hand_ts + 3.0, seg_end_ts + 30.0)
-    step_s = 1.0
+
+    votes: Counter = Counter()
+    frames_checked = 0
 
     t = search_start
     while t <= search_end:
@@ -566,7 +604,17 @@ def _extract_winner(
         if crop is not None:
             winner = ocr_winner(crop)
             if winner:
-                return winner
-        t += step_s
+                votes[winner] += 1
+            frames_checked += 1
+        t += 1.0
 
-    return None
+    if not votes:
+        return None
+
+    # Retorna vencedor com maioria de votos; rejeita se só 1 frame votou
+    # e há múltiplos frames disponíveis (evita falsos positivos)
+    best, count = votes.most_common(1)[0]
+    if frames_checked >= 3 and count == 1:
+        # Candidato único em apenas 1 frame — muito fraco, descarta
+        return None
+    return best
