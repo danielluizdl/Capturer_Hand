@@ -10,7 +10,7 @@ from typing import Optional
 from src.gabarito_parser import HandHistory
 from src.video_pipeline import TableEvent
 from src.detectors import crop_table, detect_dealer_button
-from src.ocr_engine import ocr_title_bar, ocr_pot, ocr_board_cards, ocr_hole_cards, ocr_winner, ocr_stacks
+from src.ocr_engine import ocr_title_bar, ocr_pot, ocr_hole_cards, ocr_winner, ocr_stacks
 from src.card_classifier import extract_board_cards_slotted
 from src.seat_card_recognizer import find_showdown_cards
 
@@ -61,7 +61,12 @@ def _collect_frame_indices(
     all_evs: list[TableEvent],
     native_fps: float,
 ) -> set[int]:
-    EXTRA_FRAMES = [0, 3, 6, 9, 15]
+    # Offsets de frame para votação no board (menor para reduzir OCR)
+    EXTRA_FRAMES = [0, 6, 12]
+    # Janela de busca de winner/showdown: max 15s depois do fim da mão, a cada 2s
+    WINNER_WINDOW_S = 15.0
+    WINNER_STEP_S   = 2.0
+
     indices: set[int] = set()
     for seg in hand_segs:
         sorted_seg = sorted(seg, key=lambda e: e.timestamp)
@@ -72,7 +77,7 @@ def _collect_frame_indices(
                 for offset in EXTRA_FRAMES:
                     indices.add(ev.frame_idx + offset)
         active = sorted([e for e in seg if e.board_cards > 0], key=lambda e: e.timestamp)
-        for ev in (active[-5:] if len(active) >= 5 else active):
+        for ev in (active[-4:] if len(active) >= 4 else active):
             indices.add(ev.frame_idx)
         preflop = sorted([e for e in seg if e.board_cards == 0], key=lambda e: e.timestamp)[:5]
         early_board = sorted([e for e in seg if e.board_cards in (3, 4)], key=lambda e: e.timestamp)[:3]
@@ -85,13 +90,13 @@ def _collect_frame_indices(
             [e for e in all_evs if e.table_idx == tid and e.event_type == "new_hand" and e.timestamp > seg_end_ts],
             key=lambda e: e.timestamp,
         )
-        next_new_hand_ts = future_new_hands[0].timestamp if future_new_hands else seg_end_ts + 20.0
-        search_start = max(0.0, seg_end_ts - 3.0)
-        search_end = min(next_new_hand_ts + 3.0, seg_end_ts + 30.0)
+        next_new_hand_ts = future_new_hands[0].timestamp if future_new_hands else seg_end_ts + WINNER_WINDOW_S
+        search_start = max(0.0, seg_end_ts - 2.0)
+        search_end = min(next_new_hand_ts + 2.0, seg_end_ts + WINNER_WINDOW_S)
         t = search_start
         while t <= search_end:
             indices.add(int(t * native_fps))
-            t += 1.0
+            t += WINNER_STEP_S
     return indices
 
 
@@ -698,7 +703,7 @@ def _extract_showdown_cards(
     )
 
     search_start = max(0.0, seg_end_ts - 2.0)
-    search_end   = min(next_new_hand_ts + 2.0, seg_end_ts + 25.0)
+    search_end   = min(next_new_hand_ts + 2.0, seg_end_ts + 15.0)
 
     # Acumula votos por posicao espacial aproximada
     # Chave: (x//50, y//50) — celula de 50px para agrupar deteccoes do mesmo seat
@@ -720,7 +725,7 @@ def _extract_showdown_cards(
                 if cell not in pos_votes:
                     pos_votes[cell] = Counter()
                 pos_votes[cell][pair] += 1
-        t += 1.0
+        t += 2.0
 
     # Para cada posicao, escolhe o par com mais votos
     result: dict[str, list[str]] = {}
@@ -764,8 +769,8 @@ def _extract_winner(
         future_new_hands[0].timestamp if future_new_hands else seg_end_ts + 20.0
     )
 
-    search_start = max(0.0, seg_end_ts - 3.0)
-    search_end = min(next_new_hand_ts + 3.0, seg_end_ts + 30.0)
+    search_start = max(0.0, seg_end_ts - 2.0)
+    search_end = min(next_new_hand_ts + 2.0, seg_end_ts + 15.0)
 
     votes: Counter = Counter()
     frames_checked = 0
@@ -779,7 +784,7 @@ def _extract_winner(
             if winner:
                 votes[winner] += 1
             frames_checked += 1
-        t += 1.0
+        t += 2.0
 
     if not votes:
         return None
