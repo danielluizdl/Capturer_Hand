@@ -9,7 +9,7 @@ from typing import Optional
 
 from src.gabarito_parser import HandHistory
 from src.video_pipeline import TableEvent
-from src.detectors import crop_table
+from src.detectors import crop_table, detect_dealer_button
 from src.ocr_engine import ocr_title_bar, ocr_pot, ocr_board_cards, ocr_hole_cards, ocr_winner
 from src.card_classifier import extract_board_cards_slotted
 from src.seat_card_recognizer import find_showdown_cards
@@ -282,11 +282,14 @@ def _build_hand_for_segment(
     # Hole cards dos opponents no showdown via template matching
     showdown = _extract_showdown_cards(tid, seg, all_evs, frames_cache, native_fps)
 
+    # Dealer button: tenta detectar via template nos frames preflop
+    button_seat = _detect_button_seat(seg, frames_cache)
+
     pot_by_street = {s: total_pot for s in streets[1:] if total_pot}
 
     return HandHistory(
         table_id=table_id,
-        button_seat=0,
+        button_seat=button_seat,
         players={},
         hole_cards=hole_cards,
         board=board,
@@ -297,6 +300,58 @@ def _build_hand_for_segment(
         actions=[],
         showdown=showdown,
     )
+
+
+def _detect_button_seat(
+    seg: list[TableEvent],
+    frames_cache: dict[int, np.ndarray],
+) -> int:
+    """
+    Detecta o seat do dealer button via template matching (dealer.PNG).
+    Mapeia posição (cx, cy) do dealer puck para seat number (1-8, 8-max).
+
+    Layout WPT Global 8-max (frações aproximadas do crop 960x540):
+      Seat 1 (CO/BTN area): cx≈0.75, cy≈0.45
+      Seat 2 (BTN/SB area): cx≈0.60, cy≈0.80
+      Seat 3 (SB/BB area):  cx≈0.40, cy≈0.85
+      Seat 4 (BB/STR area): cx≈0.22, cy≈0.70
+      Seat 5 (UTG area):    cx≈0.12, cy≈0.45
+      Seat 6 (MP area):     cx≈0.20, cy≈0.25
+      Seat 7 (HJ area):     cx≈0.40, cy≈0.15
+      Seat 8 (CO area):     cx≈0.62, cy≈0.18
+    Retorna 0 se não detectado.
+    """
+    # Zonas aproximadas de cada seat: (cx_min, cx_max, cy_min, cy_max, seat)
+    SEAT_ZONES = [
+        (0.60, 0.90, 0.35, 0.60, 1),  # direita-meio
+        (0.50, 0.75, 0.70, 0.95, 2),  # direita-baixo
+        (0.28, 0.55, 0.75, 0.95, 3),  # centro-baixo
+        (0.10, 0.35, 0.55, 0.85, 4),  # esquerda-baixo
+        (0.02, 0.22, 0.35, 0.60, 5),  # esquerda-meio
+        (0.08, 0.35, 0.10, 0.35, 6),  # esquerda-cima
+        (0.30, 0.55, 0.05, 0.28, 7),  # centro-cima
+        (0.50, 0.78, 0.05, 0.28, 8),  # direita-cima
+    ]
+
+    # Usa frames preflop (sem board) para detectar o dealer
+    preflop = sorted(
+        [e for e in seg if e.board_cards == 0],
+        key=lambda e: e.timestamp,
+    )[:5]
+
+    for ev in preflop:
+        crop = frames_cache.get(ev.frame_idx)
+        if crop is None:
+            continue
+        pos = detect_dealer_button(crop)
+        if pos is None:
+            continue
+        cx, cy = pos
+        for cx_min, cx_max, cy_min, cy_max, seat in SEAT_ZONES:
+            if cx_min <= cx <= cx_max and cy_min <= cy <= cy_max:
+                return seat
+
+    return 0
 
 
 def _detect_streets(seg: list[TableEvent]) -> list[str]:

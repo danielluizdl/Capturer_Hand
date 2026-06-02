@@ -2,6 +2,12 @@
 from __future__ import annotations
 import cv2
 import numpy as np
+from pathlib import Path
+
+_TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
+
+# Cache de templates carregados
+_tmpl_cache: dict[str, np.ndarray | None] = {}
 
 # Quadrantes 960x540 dentro do frame 1920x1080
 TABLE_REGIONS = [
@@ -76,6 +82,55 @@ def has_action_buttons(crop: np.ndarray) -> tuple[bool, float]:
     mask  = cv2.bitwise_or(green, cv2.bitwise_or(blue, cv2.bitwise_or(red1, red2)))
     score = float(np.sum(mask > 0) / mask.size)
     return score > 0.015, score
+
+
+def _load_template(name: str) -> np.ndarray | None:
+    """Carrega template PNG/PNG lazy com cache."""
+    if name not in _tmpl_cache:
+        for ext in (".PNG", ".png"):
+            p = _TEMPLATES_DIR / (name + ext)
+            if p.exists():
+                _tmpl_cache[name] = cv2.imread(str(p))
+                break
+        else:
+            _tmpl_cache[name] = None
+    return _tmpl_cache[name]
+
+
+def detect_dealer_button(crop: np.ndarray) -> tuple[float, float] | None:
+    """
+    Detecta a posição do dealer button (puck) no crop de mesa.
+    Usa template matching contra dealer.PNG.
+    Retorna (cx, cy) em fração do crop (0-1), ou None se não encontrado.
+    Score mínimo: 0.55.
+    """
+    tmpl = _load_template("dealer")
+    if tmpl is None:
+        return None
+    ih, iw = crop.shape[:2]
+    th, tw = tmpl.shape[:2]
+    if th > ih or tw > iw:
+        return None
+    res = cv2.matchTemplate(crop, tmpl, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, max_loc = cv2.minMaxLoc(res)
+    if max_val < 0.55:
+        return None
+    cx = (max_loc[0] + tw / 2) / iw
+    cy = (max_loc[1] + th / 2) / ih
+    return (cx, cy)
+
+
+def detect_allin(crop: np.ndarray) -> bool:
+    """Detecta se há um badge ALL-IN visível na mesa via template matching."""
+    tmpl = _load_template("allin")
+    if tmpl is None:
+        return False
+    ih, iw = crop.shape[:2]
+    th, tw = tmpl.shape[:2]
+    if th > ih or tw > iw:
+        return False
+    res = cv2.matchTemplate(crop, tmpl, cv2.TM_CCOEFF_NORMED)
+    return float(res.max()) >= 0.65
 
 
 def detect_pot_change(prev: np.ndarray, curr: np.ndarray) -> tuple[bool, float]:
