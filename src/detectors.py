@@ -133,6 +133,50 @@ def detect_allin(crop: np.ndarray) -> bool:
     return float(res.max()) >= 0.65
 
 
+def detect_action_type(crop: np.ndarray) -> str | None:
+    """
+    Detecta qual ação está sendo exibida pelos botões na action bar.
+    Usa template matching nos templates de ação disponíveis.
+
+    Retorna: 'fold' | 'call' | 'raise' | 'check' | 'allin' | None
+    Score mínimo: 0.60.
+    """
+    action_map = {
+        "desistir":      "fold",
+        "pagar":         "call",
+        "aumentar":      "raise",
+        "passar":        "check",
+        "allin":         "allin",
+        "mostrar_cartas": None,   # não é ação de aposta
+    }
+
+    h = crop.shape[0]
+    bar = crop[int(h * ACTION_BAR_TOP_F):, :]
+    if bar.size == 0:
+        return None
+
+    best_action = None
+    best_score = 0.60
+
+    for tmpl_name, action in action_map.items():
+        if action is None:
+            continue
+        tmpl = _load_template(tmpl_name)
+        if tmpl is None:
+            continue
+        th, tw = tmpl.shape[:2]
+        bh, bw = bar.shape[:2]
+        if th > bh or tw > bw:
+            continue
+        res = cv2.matchTemplate(bar, tmpl, cv2.TM_CCOEFF_NORMED)
+        score = float(res.max())
+        if score > best_score:
+            best_score = score
+            best_action = action
+
+    return best_action
+
+
 def detect_pot_change(prev: np.ndarray, curr: np.ndarray) -> tuple[bool, float]:
     """Detecta mudanca na area de texto do pot."""
     h, w = curr.shape[:2]
