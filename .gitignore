@@ -1,7 +1,17 @@
-# Video files (too large for git — exceto o vídeo de teste)
+# Video files
 *.avi
 *.mov
 *.mkv
+*.mp4
+
+# Output files gerados pelo pipeline
+*_output.txt
+
+# Claude Code internal
+.claude/
+
+# Model weights (binários grandes)
+models/*.pt
 
 # Frame extractions
 frames_preview/

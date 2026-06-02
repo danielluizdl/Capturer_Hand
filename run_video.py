@@ -67,35 +67,45 @@ def main():
     detected = build_hands(events, args.video)
     elapsed = time.perf_counter() - t0
 
-    print(f"\nPipeline concluído em {elapsed:.1f}s")
-    print(f"Mãos detectadas: {len(detected)}")
+    def _p(s):
+        """Print seguro para consoles Windows (cp1252) com nomes de jogadores unicode."""
+        try:
+            print(s)
+        except UnicodeEncodeError:
+            print(s.encode("ascii", errors="replace").decode("ascii"))
+
+    _p(f"\nPipeline concluido em {elapsed:.1f}s")
+    _p(f"Maos detectadas: {len(detected)}")
     print()
 
     if not detected:
-        print("Nenhuma mão detectada.")
+        _p("Nenhuma mao detectada.")
         sys.exit(0)
 
-    # Imprime resumo de cada mão
+    # Imprime resumo de cada mao
     print("=" * 60)
     for i, hh in enumerate(detected, 1):
         board_str = " ".join(hh.board) if hh.board else "(sem board)"
-        holes_str = " ".join(hh.hole_cards) if hh.hole_cards else "(não detectadas)"
+        holes_str = " ".join(hh.hole_cards) if hh.hole_cards else "(nao detectadas)"
         streets_str = " > ".join(hh.streets)
-        print(f"Mão {i}: [{hh.table_id}]")
-        print(f"  Streets:    {streets_str}")
-        print(f"  Board:      {board_str}")
-        print(f"  Hole cards: {holes_str}")
-        print(f"  Pot:        ${hh.total_pot:.2f}")
-        print(f"  Vencedor:   {hh.winner or '(não detectado)'}")
+        _p(f"Mao {i}: [{hh.table_id}]")
+        _p(f"  Streets:    {streets_str}")
+        _p(f"  Board:      {board_str}")
+        _p(f"  Hole cards: {holes_str}")
+        _p(f"  Pot:        ${hh.total_pot:.2f}")
+        _p(f"  Vencedor:   {hh.winner or '(nao detectado)'}")
+        if hh.showdown:
+            for player_key, cards in sorted(hh.showdown.items()):
+                _p(f"  Showdown:   {player_key} [{' '.join(cards)}]")
         print()
 
-    # Gera arquivo de saída no formato PokerStars
+    # Gera arquivo de saida no formato PokerStars
     hh_text = write_session(detected)
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(hh_text)
 
     print(f"Output salvo em: {args.out}")
-    print(f"Total de mãos:   {len(detected)}")
+    print(f"Total de maos:   {len(detected)}")
 
 
 if __name__ == "__main__":

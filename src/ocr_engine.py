@@ -9,17 +9,104 @@ _ocr_lock = threading.Lock()
 _USE_GPU = False
 
 
+def _add_cuda_to_path() -> None:
+    """
+    Adiciona CUDA bin ao PATH do processo (necessário para DLLs nativas transitivas).
+    Busca em: (1) CUDA Toolkit instalado no sistema, (2) pacotes pip nvidia-*.
+    """
+    import os, glob, sys
+
+    dirs_to_add: list[str] = []
+
+    # CUDA Toolkit do sistema
+    cuda_base = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
+    if os.path.isdir(cuda_base):
+        for vd in sorted(glob.glob(os.path.join(cuda_base, "v*")), reverse=True):
+            for sub in ("bin", "lib\\x64"):
+                d = os.path.join(vd, sub)
+                if os.path.isdir(d):
+                    dirs_to_add.append(d)
+
+    # Pacotes pip nvidia-cudnn-cu12, nvidia-cublas-cu12, etc.
+    for sp in sys.path:
+        nvidia_dir = os.path.join(sp, "nvidia")
+        if not os.path.isdir(nvidia_dir):
+            continue
+        for pkg in glob.glob(os.path.join(nvidia_dir, "*", "bin")):
+            if os.path.isdir(pkg):
+                dirs_to_add.append(pkg)
+
+    for d in dirs_to_add:
+        if d not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+        try:
+            os.add_dll_directory(d)
+        except Exception:
+            pass
+
+    # Pré-carrega DLLs CUDA via ctypes para que o loader nativo do onnxruntime
+    # as encontre já no cache do processo (evita falha de busca em PATH).
+    import ctypes, platform
+    if platform.system() == "Windows":
+        cuda_dlls = [
+            "cudart64_110.dll", "cudart64_12.dll",
+            "cublas64_11.dll", "cublasLt64_11.dll",
+            "cublas64_12.dll", "cublasLt64_12.dll",
+            "cudnn64_8.dll", "cudnn64_9.dll",
+        ]
+        for dll in cuda_dlls:
+            try:
+                ctypes.WinDLL(dll)
+            except OSError:
+                pass
+
+
 def _detect_gpu() -> bool:
-    """Retorna True se CUDAExecutionProvider estiver disponível."""
+    """
+    Retorna True apenas se CUDAExecutionProvider estiver listado e cublas64_12.dll
+    existir no CUDA Toolkit instalado. Não tenta carregar a DLL (dependências transitivas
+    tornam isso não-confiável); apenas verifica existência do arquivo.
+    """
     try:
         import onnxruntime as ort
-        available = ort.get_available_providers()
-        has_cuda = "CUDAExecutionProvider" in available
-        if not has_cuda:
-            print(f"[OCR] CUDA não disponível. Providers: {available}")
-        return has_cuda
+        if "CUDAExecutionProvider" not in ort.get_available_providers():
+            print(f"[OCR] CUDA não listado. Providers: {ort.get_available_providers()}")
+            return False
+        import os, glob, sys, platform
+        if platform.system() == "Windows":
+            # Coleta dirs de busca: Toolkit do sistema + pacotes pip nvidia-*
+            search_dirs: list[str] = []
+            cuda_base = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
+            if os.path.isdir(cuda_base):
+                for vd in sorted(glob.glob(os.path.join(cuda_base, "v*")), reverse=True):
+                    search_dirs.append(os.path.join(vd, "bin"))
+            for sp in sys.path:
+                nvidia_dir = os.path.join(sp, "nvidia")
+                if os.path.isdir(nvidia_dir):
+                    for pkg_bin in glob.glob(os.path.join(nvidia_dir, "*", "bin")):
+                        search_dirs.append(pkg_bin)
+
+            # Aceita CUDA 11 (cuDNN 8) ou CUDA 12 (cuDNN 9)
+            cuda11 = {"cublas64_11.dll": False, "cudnn64_8.dll": False, "cudart64_110.dll": False}
+            cuda12 = {"cublas64_12.dll": False, "cudnn64_9.dll": False}
+            for d in search_dirs:
+                for dll in list(cuda11):
+                    if not cuda11[dll] and os.path.isfile(os.path.join(d, dll)):
+                        cuda11[dll] = True
+                for dll in list(cuda12):
+                    if not cuda12[dll] and os.path.isfile(os.path.join(d, dll)):
+                        cuda12[dll] = True
+
+            has_cuda11 = all(cuda11.values())
+            has_cuda12 = all(cuda12.values())
+
+            if not has_cuda11 and not has_cuda12:
+                missing11 = [dll for dll, found in cuda11.items() if not found]
+                print(f"[OCR] CUDA não disponível. Faltando (CUDA 11): {missing11}")
+                return False
+        return True
     except Exception as e:
-        print(f"[OCR] Erro ao detectar GPU: {e}")
+        print(f"[OCR] Erro ao verificar GPU: {e}")
         return False
 
 
@@ -28,15 +115,27 @@ def _ocr():
     if _ocr_instance is None:
         with _ocr_lock:
             if _ocr_instance is None:  # double-checked locking
+                # Adiciona CUDA ao PATH antes de importar rapidocr/onnxruntime
+                _add_cuda_to_path()
                 from rapidocr_onnxruntime import RapidOCR
                 _USE_GPU = _detect_gpu()
                 if _USE_GPU:
-                    _ocr_instance = RapidOCR(
-                        det_use_cuda=True,
-                        cls_use_cuda=True,
-                        rec_use_cuda=True,
-                    )
-                    print("[OCR] Usando GPU (CUDA)")
+                    try:
+                        inst = RapidOCR(
+                            det_use_cuda=True,
+                            cls_use_cuda=True,
+                            rec_use_cuda=True,
+                        )
+                        # Teste rápido — cuDNN 9 falha em GPUs Pascal (sm_61) ou mais antigas
+                        inst(np.zeros((64, 64, 3), dtype=np.uint8))
+                        _ocr_instance = inst
+                        print("[OCR] Usando GPU (CUDA)")
+                    except Exception as e:
+                        print(f"[OCR] GPU falhou ({type(e).__name__}), usando CPU.")
+                        print("[OCR] Nota: cuDNN 9 requer GPU Volta+ (GTX 10xx não suportada).")
+                        _USE_GPU = False
+                        _ocr_instance = RapidOCR()
+                        print("[OCR] Usando CPU")
                 else:
                     _ocr_instance = RapidOCR()
                     print("[OCR] Usando CPU")

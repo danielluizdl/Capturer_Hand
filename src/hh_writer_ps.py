@@ -94,6 +94,13 @@ def write_hand(hh: HandHistory, hand_id: int = 900000) -> str:
             f"*** RIVER *** [{' '.join(flop)}] [{' '.join(turn)}] [{' '.join(river)}]"
         )
 
+    # [13] Showdown — cartas dos opponents detectadas por template matching
+    if hh.showdown:
+        lines.append("*** SHOWDOWN ***")
+        for player_key, cards in sorted(hh.showdown.items()):
+            cards_str = " ".join(cards)
+            lines.append(f"{player_key}: shows [{cards_str}]")
+
     # [14] Coleta do pote
     if hh.winner:
         lines.append(f"{hh.winner} collected ${hh.total_pot:.2f} from pot")

@@ -12,6 +12,7 @@ from src.video_pipeline import TableEvent
 from src.detectors import crop_table
 from src.ocr_engine import ocr_title_bar, ocr_pot, ocr_board_cards, ocr_hole_cards, ocr_winner
 from src.card_classifier import extract_board_cards_slotted
+from src.seat_card_recognizer import find_showdown_cards
 
 # 1 BB = $0.10 nas stakes $0.05/$0.10/$0.20 do vídeo de teste
 BB_TO_USD = 0.10
@@ -119,9 +120,8 @@ def build_hands(
     video_path: str,
 ) -> list[HandHistory]:
     """
-    Fase 1: coleta frame indices de todas as mesas.
-    Fase 2: UMA passagem sequencial no vídeo → crops por mesa.
-    Fase 3: workers paralelos fazem apenas OCR (sem I/O).
+    Por mesa: 1 passagem sequencial no vídeo + OCR imediato.
+    Processa uma mesa por vez para limitar uso de RAM em vídeos longos.
     """
     cap_info = cv2.VideoCapture(video_path)
     native_fps = cap_info.get(cv2.CAP_PROP_FPS)
@@ -129,7 +129,7 @@ def build_hands(
 
     all_evs = [ev for ev_list in events.values() for ev in ev_list]
 
-    # Fase 1: determina frames necessários por mesa
+    # Fase 1: segmentos e frames necessários por mesa
     per_table_segs: dict[int, list] = {}
     per_table_needed: dict[int, set[int]] = {}
     for tid, ev_list in events.items():
@@ -144,29 +144,19 @@ def build_hands(
     if not per_table_needed:
         return []
 
-    # Fase 2: UMA passagem sequencial para todas as mesas
     total_crops = sum(len(v) for v in per_table_needed.values())
-    print(f"  Extraindo frames: {total_crops} crops em 1 passagem...")
-    per_table_crops = _read_and_crop_all_tables(video_path, per_table_needed)
+    print(f"  Total: {total_crops} crops em {len(per_table_needed)} mesas (processando 1 mesa por vez)")
 
-    # Fase 3: OCR paralelo por mesa (sem I/O)
-    worker_args = [
-        (tid, events[tid], all_evs, per_table_crops[tid], native_fps)
-        for tid in per_table_segs
-    ]
-
-    try:
-        from multiprocessing.pool import ThreadPool
-        n_workers = min(len(worker_args), multiprocessing.cpu_count())
-        with ThreadPool(processes=n_workers) as pool:
-            table_results = pool.map(_process_table_ocr_worker, worker_args)
-    except Exception as e:
-        print(f"  Pool falhou ({e}), rodando sequencial...")
-        table_results = [_process_table_ocr_worker(args) for args in worker_args]
-
+    # Fase 2+3: uma mesa por vez — leitura + OCR sequencial (controla RAM)
     result: list[HandHistory] = []
-    for hands in table_results:
+    for i, tid in enumerate(per_table_segs, 1):
+        n = len(per_table_needed[tid])
+        print(f"  [mesa {tid}] {n} frames (pass {i}/{len(per_table_segs)})...", flush=True)
+        crops = _read_and_crop_all_tables(video_path, {tid: per_table_needed[tid]})[tid]
+        hands = _process_table_ocr_worker((tid, events[tid], all_evs, crops, native_fps))
         result.extend(hands)
+        del crops  # libera RAM antes da próxima mesa
+
     return result
 
 
@@ -265,6 +255,9 @@ def _build_hand_for_segment(
     # Vencedor
     winner = _extract_winner(tid, seg, all_evs, frames_cache, native_fps)
 
+    # Hole cards dos opponents no showdown via template matching
+    showdown = _extract_showdown_cards(tid, seg, all_evs, frames_cache, native_fps)
+
     pot_by_street = {s: total_pot for s in streets[1:] if total_pot}
 
     return HandHistory(
@@ -278,6 +271,7 @@ def _build_hand_for_segment(
         total_pot=total_pot or 0.0,
         winner=winner or "",
         actions=[],
+        showdown=showdown,
     )
 
 
@@ -465,6 +459,77 @@ def _extract_hole_cards(
             return cards[:2]
 
     return []
+
+
+def _extract_showdown_cards(
+    tid: int,
+    seg: list[TableEvent],
+    all_evs: list[TableEvent],
+    frames_cache: dict[int, np.ndarray],
+    native_fps: float,
+) -> dict[str, list[str]]:
+    """
+    Detecta hole cards dos opponents exibidas no showdown via template matching.
+
+    Busca os templates no frame inteiro — SEM calibracao de seats.
+    Vota por maioria entre os frames da janela pos-mao para robustez.
+
+    Retorna {"player_1": ["Ah", "Ks"], "player_2": ["9c", "Qd"], ...}
+    onde a chave e "player_N" pela ordem espacial (cima->baixo, esq->dir).
+    """
+    seg_end_ts = max(e.timestamp for e in seg)
+
+    future_new_hands = sorted(
+        [e for e in all_evs if e.table_idx == tid
+         and e.event_type == "new_hand" and e.timestamp > seg_end_ts],
+        key=lambda e: e.timestamp,
+    )
+    next_new_hand_ts = (
+        future_new_hands[0].timestamp if future_new_hands else seg_end_ts + 20.0
+    )
+
+    search_start = max(0.0, seg_end_ts - 2.0)
+    search_end   = min(next_new_hand_ts + 2.0, seg_end_ts + 25.0)
+
+    # Acumula votos por posicao espacial aproximada
+    # Chave: (x//50, y//50) — celula de 50px para agrupar deteccoes do mesmo seat
+    pos_votes: dict[tuple, Counter] = {}
+
+    t = search_start
+    while t <= search_end:
+        fi = int(t * native_fps)
+        crop = frames_cache.get(fi)
+        if crop is not None:
+            h = crop.shape[0]
+            # Exclui board (centro) e seat do hero (base) — deixa apenas seats dos opponents
+            board_excl = (int(h * 0.38), int(h * 0.75))
+            for pair_info in find_showdown_cards(crop, board_excl=board_excl):
+                lc   = _fmt_card(pair_info["left"])
+                rc   = _fmt_card(pair_info["right"])
+                pair = lc + rc
+                cell = (pair_info["x"] // 50, pair_info["y"] // 50)
+                if cell not in pos_votes:
+                    pos_votes[cell] = Counter()
+                pos_votes[cell][pair] += 1
+        t += 1.0
+
+    # Para cada posicao, escolhe o par com mais votos
+    result: dict[str, list[str]] = {}
+    for i, (cell, votes) in enumerate(
+        sorted(pos_votes.items(), key=lambda kv: kv[0])  # ordena espacialmente
+    ):
+        if not votes:
+            continue
+        best_pair, n_votes = votes.most_common(1)[0]
+        if n_votes >= 1 and len(best_pair) == 4:
+            result[f"player_{i + 1}"] = [best_pair[:2], best_pair[2:]]
+
+    return result
+
+
+def _fmt_card(card: str) -> str:
+    """'ah' -> 'Ah', '9c' -> '9c'"""
+    return card[0].upper() + card[1]
 
 
 def _extract_winner(

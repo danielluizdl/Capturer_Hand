@@ -48,7 +48,7 @@ def process_video(
     skip = max(1, round(native_fps / fps))
     real_fps = native_fps / skip
 
-    print(f"Vídeo: {total_frames} frames @ {native_fps:.1f}fps → processando a {real_fps:.1f}fps (skip={skip})")
+    print(f"Video: {total_frames} frames @ {native_fps:.1f}fps -> processando a {real_fps:.1f}fps (skip={skip})")
 
     # Estado por mesa
     prev_crops:   list[Optional[np.ndarray]] = [None] * 4
@@ -139,7 +139,7 @@ def process_video(
         # Fallback para mapeamento fixo (cobertura pelo banner de Jackpot)
         if table_ids[tid] is None:
             table_ids[tid] = FIXED_TABLE_IDS.get(tid, f"TABLE{tid}")
-            print(f"  mesa{tid}: OCR falhou, usando mapeamento fixo → {table_ids[tid]}")
+            print(f"  mesa{tid}: OCR falhou, usando mapeamento fixo -> {table_ids[tid]}")
 
         # Atualiza eventos com table_id correto
         for ev in events[tid]:
