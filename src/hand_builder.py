@@ -632,29 +632,42 @@ def _extract_hole_cards(
     frames_cache: dict[int, np.ndarray],
 ) -> list[str]:
     """
-    Tenta extrair hole cards do herói.
-    Estratégia: pré-flop (board==0) primeiro, depois flop/turn.
+    Tenta extrair hole cards do herói via votação por maioria entre frames.
+    Prioridade: pré-flop (cartas recém-distribuídas) → flop/turn.
     """
-    # Candidatos pré-flop (cartas recém-distribuídas)
     preflop = sorted(
         [e for e in seg if e.board_cards == 0],
         key=lambda e: e.timestamp,
-    )[:5]
-    # Candidatos flop/turn (herói ainda na mão)
+    )[:8]
     early_board = sorted(
         [e for e in seg if e.board_cards in (3, 4)],
         key=lambda e: e.timestamp,
-    )[:3]
+    )[:4]
 
+    # Votação por par de hole cards
+    pair_votes: Counter = Counter()
     for ev in preflop + early_board:
         crop = frames_cache.get(ev.frame_idx)
         if crop is None:
             continue
         cards = ocr_hole_cards(crop)
         if len(cards) >= 2:
-            return cards[:2]
+            # Usa par ordenado como chave (ordem pode variar entre frames)
+            key = tuple(sorted(c.lower() for c in cards[:2]))
+            pair_votes[key] += 1
 
-    return []
+    if not pair_votes:
+        return []
+
+    best_pair, n_votes = pair_votes.most_common(1)[0]
+    # Aceita com pelo menos 1 voto, mas prefere votos múltiplos
+    frames_tried = len(preflop) + len(early_board)
+    if frames_tried >= 3 and n_votes == 1 and len(pair_votes) > 1:
+        # Apenas 1 frame votou num par único com outros candidatos → fraco
+        return []
+
+    # Retorna as cartas normalizadas
+    return [_norm_card(c) or c for c in best_pair]
 
 
 def _extract_showdown_cards(

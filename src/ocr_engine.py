@@ -349,95 +349,114 @@ def _find_winner_badge(crop: np.ndarray) -> tuple[float, float] | None:
     return (max_loc[0] + tw / 2, max_loc[1] + th / 2)
 
 
+_UI_SKIP_WINNER = {
+    'log de jogos', 'carta alta', 'gongfuboy', 'poker', 'nexa',
+    'jackpot', 'flips', 'master', 'spf', 'poner', 'maos', 'vpnp',
+    'desistir', 'passar', 'aposta', 'aumentar', 'pagar', 'verificar',
+    'log', 'jogos', 'mostrar', 'rabbit', 'hunt', 'carta', 'alta',
+    'bb', 'potetotal', 'pote', 'total', 'winner', 'vencedor',
+}
+
+
+def _is_player_name(text: str) -> bool:
+    """Retorna True se o texto parece ser nome de jogador (não UI noise)."""
+    t = text.strip()
+    if not (3 <= len(t) <= 25):
+        return False
+    if re.fullmatch(r'[\d,\.\s]+BB?', t, re.I):
+        return False
+    if re.fullmatch(r'[\d,\.]+', t):
+        return False
+    if not any(c.isalpha() for c in t):
+        return False
+    t_low = t.lower()
+    if any(skip in t_low for skip in _UI_SKIP_WINNER):
+        return False
+    return True
+
+
 def ocr_winner(crop: np.ndarray) -> str | None:
     """
     Detecta o vencedor pela proximidade espacial ao badge 'WINNER'.
-    Estratégia dupla: template matching (mais robusto) + OCR como fallback.
-    - Retorna o nome de jogador mais próximo ao badge WINNER
-    - Fallback: 'dLzinN' se WINNER estiver na zona do herói (y > 80%)
+    Estratégia:
+    1. Template matching para localizar o badge (mais robusto).
+    2. OCR em ROI ao redor do badge (mais eficiente que OCR no frame completo).
+    3. Fallback OCR no frame completo se sem template.
     """
     h, w = crop.shape[:2]
 
-    # Textos de UI a ignorar
-    UI_SKIP = {
-        'LOG DE JOGOS', 'Carta alta', 'Carta Alta', 'GongFuBoy...', 'POKER', 'NEXA',
-        'JACKPOT', 'FLIPS', 'MASTER', 'SPF', 'PONER', 'MAOS', 'VPNP',
-        'Desistir', 'Passar', 'Aposta', 'Aumentar', 'Pagar', 'Verificar',
-        'LOG', 'JOGOS', 'Passar/Desistir', 'Mostrar', 'Rabbit', 'Hunt',
-        'Carta', 'alta', 'BB', 'PoteTotal', 'Pote', 'Total',
-    }
-
-    def _center(bbox):
+    def _center(bbox) -> tuple[float, float]:
         return (
             float(np.mean([p[0] for p in bbox])),
             float(np.mean([p[1] for p in bbox])),
         )
 
-    # Tenta primeiro o template matching para localizar o badge WINNER
     winner_pos = _find_winner_badge(crop)
 
-    # OCR para obter nome do vencedor E posição do badge (fallback de localização)
-    result, _ = _ocr()(crop)
+    # Verificação rápida da hero zone sem OCR
+    if winner_pos is not None:
+        wx, wy = winner_pos
+        if wy / h > 0.80 and 0.30 < wx / w < 0.70:
+            return "dLzinN"
+
+    # Escolhe ROI para OCR: ao redor do badge (se encontrado) ou full crop
+    if winner_pos is not None:
+        wx, wy = winner_pos
+        # Faixa horizontal ampla + faixa vertical contendo nome (acima/abaixo do badge)
+        roi_x1 = max(0,  int(wx) - 280)
+        roi_x2 = min(w,  int(wx) + 280)
+        roi_y1 = max(0,  int(wy) - 80)
+        roi_y2 = min(h,  int(wy) + 120)
+        ocr_roi = crop[roi_y1:roi_y2, roi_x1:roi_x2]
+        x_offset, y_offset = roi_x1, roi_y1
+    else:
+        ocr_roi = crop
+        x_offset, y_offset = 0, 0
+
+    if ocr_roi.size == 0:
+        return None
+
+    result, _ = _ocr()(ocr_roi)
     candidates: list[tuple[str, float, float]] = []
 
     if result:
         for r in result:
             bbox, tx, conf = r[0], r[1], r[2]
-            if conf < 0.6:
+            if conf < 0.55:
                 continue
             tx_clean = tx.strip()
 
-            # Badge WINNER via OCR (fallback se template não achou)
+            # Badge via OCR: atualiza posição se template não encontrou
             if tx_clean.upper() in ('WINNER', 'VENCEDOR', 'WINN', 'WINNE'):
                 if winner_pos is None:
-                    winner_pos = _center(bbox)
+                    cx, cy = _center(bbox)
+                    winner_pos = (cx + x_offset, cy + y_offset)
                 continue
 
-            # Candidato a nome de jogador
-            if len(tx_clean) >= 3 and len(tx_clean) <= 25:
-                if re.fullmatch(r'[\d,\.]+\s*BB?', tx_clean, re.I):
-                    continue
-                if re.fullmatch(r'[\d,\.]+', tx_clean):
-                    continue
-                skip = any(ui.lower() in tx_clean.lower() for ui in UI_SKIP)
-                if skip:
-                    continue
-                if not any(c.isalpha() for c in tx_clean):
-                    continue
+            if _is_player_name(tx_clean):
                 cx, cy = _center(bbox)
-                candidates.append((tx_clean, cx, cy))
+                candidates.append((tx_clean.rstrip('.…').strip(), cx + x_offset, cy + y_offset))
 
     if winner_pos is None:
         return None
 
     wx, wy = winner_pos
 
-    # Hero zone: bottom-center do layout WPT Global (y > 80%, x em 30-70%)
     if wy / h > 0.80 and 0.30 < wx / w < 0.70:
         return "dLzinN"
 
-    # Remove '...' e '…' de nomes truncados
-    cleaned = [
-        (name.rstrip('.').rstrip('…').strip(), cx, cy)
-        for name, cx, cy in candidates
-    ]
-    cleaned = [(n, cx, cy) for n, cx, cy in cleaned if n]
-
-    if not cleaned:
-        # Sem candidatos de nome, verifica zona do herói com threshold menor
+    if not candidates:
         if wy / h > 0.75:
             return "dLzinN"
         return None
 
-    # Encontra o nome de jogador mais próximo ao badge
     best_name, best_dist = None, float("inf")
-    for name, cx, cy in cleaned:
+    for name, cx, cy in candidates:
         dist = ((cx - wx) ** 2 + (cy - wy) ** 2) ** 0.5
         if dist < best_dist:
             best_dist = dist
             best_name = name
 
-    # Limiar mais generoso com template matching (350px → 400px)
     max_dist = 400 if _get_winner_template() is not None else 350
     if best_dist > max_dist:
         return None
