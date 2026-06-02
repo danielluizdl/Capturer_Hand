@@ -288,6 +288,9 @@ def _build_hand_for_segment(
     # Stacks dos jogadores: OCR nos frames preflop
     players = _extract_players(seg, frames_cache)
 
+    # Valida board: remove duplicatas e colisões com hole cards
+    board = _validate_board(board, hole_cards)
+
     pot_by_street = {s: total_pot for s in streets[1:] if total_pot}
 
     return HandHistory(
@@ -397,6 +400,27 @@ def _detect_button_seat(
                 return seat
 
     return 0
+
+
+def _validate_board(board: list[str], hole_cards: list[str]) -> list[str]:
+    """
+    Remove cartas duplicadas do board e elimina cartas que colidem com
+    as hole cards do herói. Mantém a ordem original das cartas.
+    """
+    if not board:
+        return board
+
+    seen: set[str] = set()
+    avoid: set[str] = {c.lower() for c in hole_cards}
+    result: list[str] = []
+
+    for card in board:
+        card_low = card.lower()
+        if card_low not in seen and card_low not in avoid:
+            seen.add(card_low)
+            result.append(card)
+
+    return result
 
 
 def _detect_streets(seg: list[TableEvent]) -> list[str]:
