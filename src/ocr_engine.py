@@ -2,6 +2,7 @@
 from __future__ import annotations
 import re
 import threading
+import cv2
 import numpy as np
 
 _ocr_instance = None
