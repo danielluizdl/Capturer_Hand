@@ -10,7 +10,7 @@ from typing import Optional
 from src.gabarito_parser import HandHistory
 from src.video_pipeline import TableEvent
 from src.detectors import crop_table, detect_dealer_button
-from src.ocr_engine import ocr_title_bar, ocr_pot, ocr_board_cards, ocr_hole_cards, ocr_winner
+from src.ocr_engine import ocr_title_bar, ocr_pot, ocr_board_cards, ocr_hole_cards, ocr_winner, ocr_stacks
 from src.card_classifier import extract_board_cards_slotted
 from src.seat_card_recognizer import find_showdown_cards
 
@@ -285,12 +285,15 @@ def _build_hand_for_segment(
     # Dealer button: tenta detectar via template nos frames preflop
     button_seat = _detect_button_seat(seg, frames_cache)
 
+    # Stacks dos jogadores: OCR nos frames preflop
+    players = _extract_players(seg, frames_cache)
+
     pot_by_street = {s: total_pot for s in streets[1:] if total_pot}
 
     return HandHistory(
         table_id=table_id,
         button_seat=button_seat,
-        players={},
+        players=players,
         hole_cards=hole_cards,
         board=board,
         streets=streets,
@@ -300,6 +303,48 @@ def _build_hand_for_segment(
         actions=[],
         showdown=showdown,
     )
+
+
+def _extract_players(
+    seg: list[TableEvent],
+    frames_cache: dict[int, np.ndarray],
+) -> dict:
+    """
+    Tenta extrair nomes e stacks de jogadores via OCR nos frames preflop.
+    Retorna {seat_num: {"name": str, "chips": float}} onde seat_num é
+    estimado pela ordem de detecção (1-8).
+    Retorna {} se OCR de stacks falhar ou retornar poucos resultados.
+    """
+    preflop = sorted(
+        [e for e in seg if e.board_cards == 0],
+        key=lambda e: e.timestamp,
+    )[:3]
+
+    all_stacks: list[dict[str, float]] = []
+    for ev in preflop:
+        crop = frames_cache.get(ev.frame_idx)
+        if crop is None:
+            continue
+        stacks = ocr_stacks(crop)
+        if stacks:
+            all_stacks.append(stacks)
+
+    if not all_stacks:
+        return {}
+
+    # Usa o frame com mais jogadores detectados
+    best = max(all_stacks, key=len)
+
+    # Converte para formato HandHistory.players
+    # Seat numbers são estimados como 1..N pela ordem de aparecimento
+    players = {}
+    for i, (name, chips_bb) in enumerate(best.items(), 1):
+        players[i] = {
+            "name": name,
+            "chips": round(chips_bb * BB_TO_USD, 2),
+        }
+
+    return players
 
 
 def _detect_button_seat(
