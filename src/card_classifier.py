@@ -144,13 +144,25 @@ def classify_card(card_crop: np.ndarray) -> str | None:
     """
     Retorna notação padrão: 'Ac', 'Ks', '8h', etc.
     Retorna None se naipe ou rank não puderem ser determinados.
+
+    Pipeline:
+    1. CNN com conf >= 0.85: aceita direto (alta confiança)
+    2. CNN com conf >= 0.70: verifica naipe via HSV e corrige se diferente
+    3. Fallback: HSV (naipe) + OCR (rank)
     """
     try:
         from src.card_cnn import get_card_cnn
         cnn_card, conf = get_card_cnn().predict(card_crop)
         if conf >= 0.70 and len(cnn_card) == 2:
-            r = cnn_card[0].upper() if cnn_card[0] in 'tjqka' else cnn_card[0]
-            return r + cnn_card[1]
+            cnn_rank = cnn_card[0].upper() if cnn_card[0] in 'tjqka' else cnn_card[0]
+            cnn_suit = cnn_card[1]
+            if conf >= 0.85:
+                # Alta confiança: aceita direto
+                return cnn_rank + cnn_suit
+            # Confiança moderada: verifica naipe via HSV
+            hsv_suit = detect_suit(card_crop)
+            final_suit = hsv_suit if (hsv_suit != "?" and hsv_suit != cnn_suit) else cnn_suit
+            return cnn_rank + final_suit
     except Exception:
         pass
     suit = detect_suit(card_crop)
