@@ -229,14 +229,45 @@ def extract_hole_cards(table_crop: np.ndarray) -> list[str]:
     Coords absolutas — a posição y=370-435 é fixa para h=540 e h=502 porque
     a taskbar (38px) é cortada pela base, não pelo topo.
     Retorna lista de 0, 1 ou 2 cartas.
+
+    Pipeline: tenta CNN primeiro no crop completo de cada carta;
+    fallback para HSV (naipe) + OCR (rank) se CNN não atingir 0.65.
     """
     h, w = table_crop.shape[:2]
     y1 = min(HERO_Y1, h - 10)
     y2 = min(HERO_Y2, h)
 
+    # Expande levemente a região para ter mais contexto para a CNN
+    CNN_X_EXPAND = 10
+
     cards: list[str] = []
     for suit_x1, suit_x2 in [(HERO_LEFT_X1, HERO_LEFT_X2),
                                (HERO_RIGHT_X1, HERO_RIGHT_X2)]:
+        # Crop expandido para CNN
+        cnn_x1 = max(0, suit_x1 - CNN_X_EXPAND)
+        cnn_x2 = min(w, suit_x2 + CNN_X_EXPAND)
+        card_crop = table_crop[y1:y2, cnn_x1:cnn_x2]
+
+        # Tenta CNN
+        try:
+            from src.card_cnn import get_card_cnn
+            cnn_card, conf = get_card_cnn().predict(card_crop)
+            if conf >= 0.65 and len(cnn_card) == 2:
+                cnn_rank = cnn_card[0].upper() if cnn_card[0] in 'tjqka' else cnn_card[0]
+                # Verifica naipe com HSV se confiança moderada
+                if conf < 0.85:
+                    suit_crop = table_crop[y1:y2, suit_x1:suit_x2]
+                    hsv_suit = detect_suit(suit_crop)
+                    final_suit = hsv_suit if hsv_suit != "?" else cnn_card[1]
+                else:
+                    final_suit = cnn_card[1]
+                if cnn_rank in VALID_RANKS:
+                    cards.append(cnn_rank + final_suit)
+                    continue
+        except Exception:
+            pass
+
+        # Fallback: HSV + OCR
         suit_crop = table_crop[y1:y2, suit_x1:suit_x2]
         suit = detect_suit(suit_crop)
         if suit == "?":
