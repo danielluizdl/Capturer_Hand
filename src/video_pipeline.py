@@ -212,5 +212,32 @@ def process_video(
         for ev in events[tid]:
             ev.table_id = table_ids[tid]
 
+    # Deduplicação pós-processamento: remove eventos redundantes do mesmo tipo
+    # em janela de 1 segundo (evita spam de pot_change e action)
+    for tid in tids:
+        events[tid] = _dedup_events(events[tid])
+
     print(f"Eventos por mesa: { {i: len(v) for i, v in events.items()} }")
     return events
+
+
+def _dedup_events(evs: list[TableEvent], window_s: float = 1.0) -> list[TableEvent]:
+    """
+    Remove eventos redundantes do mesmo tipo em janela de `window_s` segundos.
+    board_change e new_hand nunca são deduplicados (são sempre relevantes).
+    pot_change e action são deduplicados se o mesmo tipo aparecer dentro da janela.
+    """
+    DEDUP_TYPES = {"pot_change", "action"}
+    result: list[TableEvent] = []
+    last_by_type: dict[str, float] = {}
+
+    for ev in sorted(evs, key=lambda e: e.timestamp):
+        if ev.event_type not in DEDUP_TYPES:
+            result.append(ev)
+            continue
+        last_ts = last_by_type.get(ev.event_type, -999.0)
+        if ev.timestamp - last_ts >= window_s:
+            result.append(ev)
+            last_by_type[ev.event_type] = ev.timestamp
+
+    return result
