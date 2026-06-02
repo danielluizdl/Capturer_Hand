@@ -203,40 +203,49 @@ def extract_board_cards_slotted(table_crop: np.ndarray, n_cards: int) -> list[st
 
     RANK_LEFT_SHIFT = 25
 
-    # Tenta carregar CNN uma vez para todos os slots
-    _cnn = None
-    try:
-        from src.card_cnn import get_card_cnn
-        _cnn = get_card_cnn()
-    except Exception:
-        pass
-
-    result: list[str | None] = [None] * n_cards
+    # Extrai os crops de cada slot
+    slot_crops: list[np.ndarray | None] = []
+    slot_sx: list[tuple[int, int]] = []
     for i in range(n_cards):
         cx  = int(w * SLOT_X[i])
         sx1 = max(0, cx - hw)
         sx2 = min(w, cx + hw)
-        suit_crop = table_crop[y1:y2, sx1:sx2]
+        crop = table_crop[y1:y2, sx1:sx2]
+        slot_crops.append(crop if crop.size > 0 else None)
+        slot_sx.append((sx1, sx2))
+
+    result: list[str | None] = [None] * n_cards
+
+    # Tenta CNN em batch para todos os slots de uma vez
+    cnn_preds: list[tuple[str, float]] | None = None
+    try:
+        from src.card_cnn import get_card_cnn
+        _cnn = get_card_cnn()
+        cnn_preds = _cnn.predict_batch([c for c in slot_crops])
+    except Exception:
+        pass
+
+    for i in range(n_cards):
+        cx = int(w * SLOT_X[i])
+        suit_crop = slot_crops[i]
 
         # Tenta CNN
-        if _cnn is not None:
-            try:
-                cnn_card, conf = _cnn.predict(suit_crop)
-                if conf >= 0.65 and len(cnn_card) == 2:
-                    cnn_rank = cnn_card[0].upper() if cnn_card[0] in 'tjqka' else cnn_card[0]
-                    if cnn_rank in VALID_RANKS:
-                        # Verifica naipe via HSV em confiança moderada
-                        if conf < 0.85:
-                            hsv_suit = detect_suit(suit_crop)
-                            final_suit = hsv_suit if hsv_suit != "?" else cnn_card[1]
-                        else:
-                            final_suit = cnn_card[1]
-                        result[i] = cnn_rank + final_suit
-                        continue
-            except Exception:
-                pass
+        if cnn_preds is not None and suit_crop is not None:
+            cnn_card, conf = cnn_preds[i]
+            if conf >= 0.65 and len(cnn_card) == 2:
+                cnn_rank = cnn_card[0].upper() if cnn_card[0] in 'tjqka' else cnn_card[0]
+                if cnn_rank in VALID_RANKS:
+                    if conf < 0.85:
+                        hsv_suit = detect_suit(suit_crop)
+                        final_suit = hsv_suit if hsv_suit != "?" else cnn_card[1]
+                    else:
+                        final_suit = cnn_card[1]
+                    result[i] = cnn_rank + final_suit
+                    continue
 
         # Fallback: HSV + OCR
+        if suit_crop is None:
+            continue
         suit = detect_suit(suit_crop)
         if suit == "?":
             continue
