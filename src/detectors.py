@@ -44,11 +44,20 @@ def count_board_cards(crop: np.ndarray) -> int:
     Conta cartas visiveis no board usando variancia por slot.
     Retorna 0, 3, 4 ou 5 (valores validos em poker).
     Valores 1 e 2 sao descartados como ruido do logo NEXA.
+
+    Usa threshold adaptativo: em cenas escuras (mesa = brilho médio < 60),
+    os thresholds sao reduzidos 20% pois as cartas se destacam menos.
     """
     h, w = crop.shape[:2]
     y1 = int(h * CARD_Y1_F)
     y2 = int(h * CARD_Y2_F)
     hw = int(w * SLOT_HW_F)
+
+    # Threshold adaptativo baseado no brilho medio da faixa do board
+    board_region = crop[y1:y2, :]
+    mean_brightness = float(cv2.cvtColor(board_region, cv2.COLOR_BGR2GRAY).mean())
+    adapt_factor = 0.80 if mean_brightness < 60 else 1.0
+
     total = 0
     for xf, thr in zip(SLOT_X, SLOT_THRESHOLDS):
         cx  = int(w * xf)
@@ -58,7 +67,7 @@ def count_board_cards(crop: np.ndarray) -> int:
         if patch.size == 0:
             continue
         std = float(cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY).std())
-        if std > thr:
+        if std > thr * adapt_factor:
             total += 1
     return total if total in (0, 3, 4, 5) else 0
 
