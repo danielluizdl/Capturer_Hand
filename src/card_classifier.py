@@ -227,20 +227,24 @@ def extract_board_cards_slotted(table_crop: np.ndarray, n_cards: int) -> list[st
         cx = int(w * SLOT_X[i])
         suit_crop = slot_crops[i]
 
-        # Tenta CNN (threshold mais alto para board: 0.80)
-        # O board tem fundo decorado que pode confundir CNN treinada em templates limpos
+        # Tenta CNN (board: fundo decorado requer validação HSV obrigatória)
         if cnn_preds is not None and suit_crop is not None:
             cnn_card, conf = cnn_preds[i]
             if conf >= 0.80 and len(cnn_card) == 2:
                 cnn_rank = cnn_card[0].upper() if cnn_card[0] in 'tjqka' else cnn_card[0]
                 if cnn_rank in VALID_RANKS:
-                    if conf < 0.90:
-                        hsv_suit = detect_suit(suit_crop)
-                        final_suit = hsv_suit if hsv_suit != "?" else cnn_card[1]
-                    else:
-                        final_suit = cnn_card[1]
-                    result[i] = cnn_rank + final_suit
-                    continue
+                    # Board: SEMPRE verifica naipe via HSV — nunca aceita CNN rank
+                    # sem confirmação de naipe (background decorado gera falsos positivos)
+                    hsv_suit = detect_suit(suit_crop)
+                    if hsv_suit != "?" and hsv_suit == cnn_card[1]:
+                        # CNN e HSV concordam: aceita rank da CNN + suit do HSV
+                        result[i] = cnn_rank + hsv_suit
+                        continue
+                    elif hsv_suit == "?" and conf >= 0.92:
+                        # HSV incerto e CNN muito confiante: aceita
+                        result[i] = cnn_rank + cnn_card[1]
+                        continue
+                    # CNN e HSV discordam: cai no fallback HSV+OCR
 
         # Fallback: HSV + OCR
         if suit_crop is None:
