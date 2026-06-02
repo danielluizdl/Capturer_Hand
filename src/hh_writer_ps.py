@@ -16,9 +16,52 @@ _SB   = 0.05
 _BB   = 0.10
 _STR  = 0.20
 
+# Rótulos de posição para mesa 8-max com straddle
+# Ordem: BTN, SB, BB, STR, UTG, UTG+1, MP, CO
+_POSITIONS_8MAX = ["BTN", "SB", "BB", "STR", "UTG", "UTG+1", "MP", "CO"]
+
+
+def _assign_positions(seats: list[int], button_seat: int) -> dict[int, str]:
+    """
+    Atribui posições a seats dado o botão.
+    Retorna {seat_num: position_label}.
+    """
+    if not seats or button_seat not in seats:
+        return {}
+    n = len(seats)
+    btn_idx = seats.index(button_seat)
+    positions = {}
+    for i, seat in enumerate(seats):
+        offset = (i - btn_idx) % n
+        label = _POSITIONS_8MAX[offset] if offset < len(_POSITIONS_8MAX) else f"P{offset}"
+        positions[seat] = label
+    return positions
+
+
+def _board_section(board: list[str], street: str) -> str:
+    """Formata linha de board para a street dada."""
+    if street == "flop":
+        return f"*** FLOP *** [{' '.join(board[:3])}]"
+    if street == "turn":
+        return f"*** TURN *** [{' '.join(board[:3])}] [{' '.join(board[3:4])}]"
+    if street == "river":
+        return (
+            f"*** RIVER *** [{' '.join(board[:3])}] "
+            f"[{' '.join(board[3:4])}] [{' '.join(board[4:5])}]"
+        )
+    return ""
+
 
 def write_hand(hh: HandHistory, hand_id: int = 900000) -> str:
     lines: list[str] = []
+    emitted_streets: set[str] = set()
+
+    def _emit_street(street: str) -> None:
+        if street not in emitted_streets and street in ("flop", "turn", "river"):
+            section = _board_section(hh.board, street)
+            if section:
+                lines.append(section)
+                emitted_streets.add(street)
 
     # [1] Header
     lines.append(
@@ -32,84 +75,91 @@ def write_hand(hh: HandHistory, hand_id: int = 900000) -> str:
         f"Table '{hh.table_id}' 8-max Seat #{hh.button_seat} is the button"
     )
 
-    # [3] Seats
-    for seat_num in sorted(hh.players):
+    # [3] Seats com posição
+    seats = sorted(hh.players)
+    positions = _assign_positions(seats, hh.button_seat)
+    for seat_num in seats:
         p = hh.players[seat_num]
-        lines.append(f"Seat {seat_num}: {p['name']} (${p['chips']:.2f} in chips)")
+        pos = positions.get(seat_num, "")
+        pos_str = f" [{pos}]" if pos else ""
+        lines.append(f"Seat {seat_num}: {p['name']}{pos_str} (${p['chips']:.2f} in chips)")
 
     # [4] Antes
-    for seat_num in sorted(hh.players):
+    for seat_num in seats:
         lines.append(f"{hh.players[seat_num]['name']}: posts the ante ${_ANTE:.2f}")
 
     # [5] Blinds — determina SB/BB/STR pela posição relativa ao botão
-    seats = sorted(hh.players)
     n = len(seats)
-    if hh.button_seat in seats:
+    if hh.button_seat in seats and n >= 3:
         btn_idx = seats.index(hh.button_seat)
         sb_seat  = seats[(btn_idx + 1) % n]
         bb_seat  = seats[(btn_idx + 2) % n]
-        str_seat = seats[(btn_idx + 3) % n]
+        str_seat = seats[(btn_idx + 3) % n] if n > 3 else None
         lines.append(f"{hh.players[sb_seat]['name']}: posts small blind ${_SB:.2f}")
         lines.append(f"{hh.players[bb_seat]['name']}: posts big blind ${_BB:.2f}")
-        lines.append(f"{hh.players[str_seat]['name']}: posts straddle ${_STR:.2f}")
+        if str_seat:
+            lines.append(f"{hh.players[str_seat]['name']}: posts straddle ${_STR:.2f}")
 
     # [6] Hole cards
     lines.append("*** HOLE CARDS ***")
     if hh.hole_cards:
         lines.append(f"Dealt to {HERO} [{' '.join(hh.hole_cards)}]")
 
-    # [7–12] Ações por rua
+    # [7–12] Ações por rua — emite cabeçalho de rua antes da primeira ação
     for act in hh.actions:
         street = act["street"]
-        # Injeta cabeçalho da rua antes da primeira ação
-        if street == "flop" and "*** FLOP ***" not in "\n".join(lines):
-            flop = hh.board[:3]
-            lines.append(f"*** FLOP *** [{' '.join(flop)}]")
-        elif street == "turn" and "*** TURN ***" not in "\n".join(lines):
-            flop = hh.board[:3]
-            turn = hh.board[3:4]
-            lines.append(f"*** TURN *** [{' '.join(flop)}] [{' '.join(turn)}]")
-        elif street == "river" and "*** RIVER ***" not in "\n".join(lines):
-            flop  = hh.board[:3]
-            turn  = hh.board[3:4]
-            river = hh.board[4:5]
-            lines.append(
-                f"*** RIVER *** [{' '.join(flop)}] [{' '.join(turn)}] [{' '.join(river)}]"
-            )
+        if street in ("flop", "turn", "river"):
+            _emit_street(street)
         lines.append(_format_action(act))
 
-    # Se não houve ações mas há board (mão encerrada por fold silencioso), emite ruas
-    if hh.board and "*** FLOP ***" not in "\n".join(lines) and "flop" in hh.streets:
-        flop = hh.board[:3]
-        lines.append(f"*** FLOP *** [{' '.join(flop)}]")
-    if len(hh.board) >= 4 and "*** TURN ***" not in "\n".join(lines) and "turn" in hh.streets:
-        flop = hh.board[:3]
-        turn = hh.board[3:4]
-        lines.append(f"*** TURN *** [{' '.join(flop)}] [{' '.join(turn)}]")
-    if len(hh.board) == 5 and "*** RIVER ***" not in "\n".join(lines) and "river" in hh.streets:
-        flop  = hh.board[:3]
-        turn  = hh.board[3:4]
-        river = hh.board[4:5]
-        lines.append(
-            f"*** RIVER *** [{' '.join(flop)}] [{' '.join(turn)}] [{' '.join(river)}]"
-        )
+    # Emite ruas do board sem ações (fold silencioso)
+    for street in ("flop", "turn", "river"):
+        if street in hh.streets:
+            _emit_street(street)
 
-    # [13] Showdown — cartas dos opponents detectadas por template matching
+    # [13] Showdown
     if hh.showdown:
         lines.append("*** SHOWDOWN ***")
         for player_key, cards in sorted(hh.showdown.items()):
-            cards_str = " ".join(cards)
-            lines.append(f"{player_key}: shows [{cards_str}]")
+            lines.append(f"{player_key}: shows [{' '.join(cards)}]")
 
     # [14] Coleta do pote
     if hh.winner:
         lines.append(f"{hh.winner} collected ${hh.total_pot:.2f} from pot")
 
-    # [16] Summary
+    # [15] Summary
     lines.append("*** SUMMARY ***")
     lines.append(f"Total pot ${hh.total_pot:.2f} | Rake $0.00")
     if hh.board:
         lines.append(f"Board [{' '.join(hh.board)}]")
+
+    # Resultado por seat no SUMMARY
+    showdown_by_player = {
+        cards[0] if len(cards) else key: cards
+        for key, cards in hh.showdown.items()
+    }
+    for seat_num in seats:
+        p = hh.players[seat_num]
+        name = p["name"]
+        pos = positions.get(seat_num, "")
+        pos_str = f" ({pos})" if pos else ""
+        if name == hh.winner:
+            cards_info = ""
+            if name in hh.showdown:
+                cards_info = f" showed [{' '.join(hh.showdown[name])}] and"
+            lines.append(
+                f"Seat {seat_num}: {name}{pos_str}{cards_info} won (${hh.total_pot:.2f})"
+            )
+        elif name == HERO and hh.hole_cards:
+            lines.append(
+                f"Seat {seat_num}: {name}{pos_str} showed [{' '.join(hh.hole_cards)}]"
+            )
+        else:
+            # Tenta encontrar cards no showdown por posição (player_1, player_2...)
+            folded = True
+            for key, cards in hh.showdown.items():
+                pass  # showdown keys são player_N não por nome neste pipeline
+            lines.append(f"Seat {seat_num}: {name}{pos_str} folded")
 
     return "\n".join(lines)
 

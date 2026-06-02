@@ -100,5 +100,60 @@ def test_board_empty_gabarito():
     result = _score_hand(det, gab)
     assert result["scores"]["board_cards"] == 0
 
+# --- _assign_positions ---
+
+def test_assign_positions_8max():
+    """8 seats com BTN no seat 3 → seat 3=BTN, 4=SB, 5=BB."""
+    from src.hh_writer_ps import _assign_positions
+    seats = [1, 2, 3, 4, 5, 6, 7, 8]
+    pos = _assign_positions(seats, 3)
+    assert pos[3] == "BTN"
+    assert pos[4] == "SB"
+    assert pos[5] == "BB"
+
+def test_assign_positions_no_button():
+    """BTN fora dos seats → dict vazio."""
+    from src.hh_writer_ps import _assign_positions
+    pos = _assign_positions([1, 2, 3], 9)
+    assert pos == {}
+
+def test_assign_positions_wrap():
+    """BTN no último seat → SB no seat 1 (wrap)."""
+    from src.hh_writer_ps import _assign_positions
+    seats = [1, 2, 3]
+    pos = _assign_positions(seats, 3)
+    assert pos[3] == "BTN"
+    assert pos[1] == "SB"
+    assert pos[2] == "BB"
+
+
+# --- _segment_hands ---
+
+def test_segment_hands_empty():
+    from src.hand_builder import _segment_hands
+    assert _segment_hands([]) == []
+
+def test_segment_hands_single_event():
+    from src.hand_builder import _segment_hands
+    from src.video_pipeline import TableEvent
+    ev = TableEvent(0.0, 0, 0, "TBL", "board_change", 3, None, False)
+    # 1 evento com board > 0 → mantido (1 elemento, board>0)
+    result = _segment_hands([ev])
+    assert len(result) == 1
+
+
+# --- ocr_pot tolerancia ---
+
+def test_parse_pot_value_ocr_errors():
+    from src.ocr_engine import _parse_pot_value
+    # O → 0, l → 1
+    assert _parse_pot_value("2O.5") == 20.5
+    assert _parse_pot_value("l5") == 15.0
+    assert _parse_pot_value("1OO") == 100.0  # 1OO -> 100, dentro do range
+    # Sanidade: pot entre 0.5 e 500
+    assert _parse_pot_value("0.1") is None  # abaixo do minimo
+    assert _parse_pot_value("600") is None   # acima do maximo
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

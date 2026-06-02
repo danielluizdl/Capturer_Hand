@@ -9,8 +9,8 @@ from typing import Optional
 
 from src.gabarito_parser import HandHistory
 from src.video_pipeline import TableEvent
-from src.detectors import crop_table
-from src.ocr_engine import ocr_title_bar, ocr_pot, ocr_board_cards, ocr_hole_cards, ocr_winner
+from src.detectors import crop_table, detect_dealer_button
+from src.ocr_engine import ocr_title_bar, ocr_pot, ocr_hole_cards, ocr_winner, ocr_stacks
 from src.card_classifier import extract_board_cards_slotted
 from src.seat_card_recognizer import find_showdown_cards
 
@@ -61,7 +61,12 @@ def _collect_frame_indices(
     all_evs: list[TableEvent],
     native_fps: float,
 ) -> set[int]:
-    EXTRA_FRAMES = [0, 3, 6, 9, 15]
+    # Offsets de frame para votação no board (menor para reduzir OCR)
+    EXTRA_FRAMES = [0, 6, 12]
+    # Janela de busca de winner/showdown: max 15s depois do fim da mão, a cada 2s
+    WINNER_WINDOW_S = 15.0
+    WINNER_STEP_S   = 2.0
+
     indices: set[int] = set()
     for seg in hand_segs:
         sorted_seg = sorted(seg, key=lambda e: e.timestamp)
@@ -72,7 +77,7 @@ def _collect_frame_indices(
                 for offset in EXTRA_FRAMES:
                     indices.add(ev.frame_idx + offset)
         active = sorted([e for e in seg if e.board_cards > 0], key=lambda e: e.timestamp)
-        for ev in (active[-5:] if len(active) >= 5 else active):
+        for ev in (active[-4:] if len(active) >= 4 else active):
             indices.add(ev.frame_idx)
         preflop = sorted([e for e in seg if e.board_cards == 0], key=lambda e: e.timestamp)[:5]
         early_board = sorted([e for e in seg if e.board_cards in (3, 4)], key=lambda e: e.timestamp)[:3]
@@ -85,13 +90,13 @@ def _collect_frame_indices(
             [e for e in all_evs if e.table_idx == tid and e.event_type == "new_hand" and e.timestamp > seg_end_ts],
             key=lambda e: e.timestamp,
         )
-        next_new_hand_ts = future_new_hands[0].timestamp if future_new_hands else seg_end_ts + 20.0
-        search_start = max(0.0, seg_end_ts - 3.0)
-        search_end = min(next_new_hand_ts + 3.0, seg_end_ts + 30.0)
+        next_new_hand_ts = future_new_hands[0].timestamp if future_new_hands else seg_end_ts + WINNER_WINDOW_S
+        search_start = max(0.0, seg_end_ts - 2.0)
+        search_end = min(next_new_hand_ts + 2.0, seg_end_ts + WINNER_WINDOW_S)
         t = search_start
         while t <= search_end:
             indices.add(int(t * native_fps))
-            t += 1.0
+            t += WINNER_STEP_S
     return indices
 
 
@@ -162,8 +167,10 @@ def build_hands(
 
 def _segment_hands(ev_list: list[TableEvent]) -> list[list[TableEvent]]:
     """
-    Divide eventos em mãos usando transições board>0 → board=0 como fronteira.
-    Cada segmento contém todos os eventos de uma mão.
+    Divide eventos em mãos usando múltiplos critérios de fronteira:
+    1. Transição board>0 → board=0 com new_hand event (critério original)
+    2. new_hand event com gap de tempo >= 5s (cobre preflop-only hands)
+    3. Gap de silêncio >= 20s entre eventos consecutivos (mãos perdidas)
     """
     sorted_evs = sorted(ev_list, key=lambda e: e.timestamp)
     if not sorted_evs:
@@ -172,20 +179,42 @@ def _segment_hands(ev_list: list[TableEvent]) -> list[list[TableEvent]]:
     hands: list[list[TableEvent]] = []
     current: list[TableEvent] = []
     prev_board = -1
+    prev_ts = sorted_evs[0].timestamp
 
     for ev in sorted_evs:
-        if prev_board > 0 and ev.board_cards == 0 and ev.event_type == "new_hand":
-            # Fim de mão: fecha segmento atual
+        time_gap = ev.timestamp - prev_ts
+        is_new_hand = ev.event_type == "new_hand"
+
+        # Critério 1: board voltou a 0 com new_hand (fim claro de mão)
+        if prev_board > 0 and ev.board_cards == 0 and is_new_hand:
             if current:
                 hands.append(current)
             current = []
+
+        # Critério 2: new_hand com gap de tempo significativo (>=5s)
+        # — captura preflop folds onde board nunca avançou
+        elif is_new_hand and time_gap >= 5.0 and current:
+            has_board = any(e.board_cards > 0 for e in current)
+            # Se segmento atual já tem board, é uma nova mão clara
+            # Se não tem board mas o gap é suficiente, provavelmente é nova mão
+            if has_board or time_gap >= 10.0:
+                hands.append(current)
+                current = []
+
+        # Critério 3: gap de silêncio longo (>=20s) — provável nova mão perdida
+        elif time_gap >= 20.0 and current:
+            hands.append(current)
+            current = []
+
         current.append(ev)
         prev_board = ev.board_cards
+        prev_ts = ev.timestamp
 
     if current:
         hands.append(current)
 
-    return hands
+    # Filtra segmentos vazios ou com apenas 1 evento sem board
+    return [h for h in hands if len(h) > 1 or any(e.board_cards > 0 for e in h)]
 
 
 def _pick_best_hand(segs: list[list[TableEvent]]) -> list[TableEvent] | None:
@@ -258,12 +287,25 @@ def _build_hand_for_segment(
     # Hole cards dos opponents no showdown via template matching
     showdown = _extract_showdown_cards(tid, seg, all_evs, frames_cache, native_fps)
 
+    # Dealer button: tenta detectar via template nos frames preflop
+    button_seat = _detect_button_seat(seg, frames_cache)
+
+    # Stacks dos jogadores: OCR nos frames preflop
+    players = _extract_players(seg, frames_cache)
+
+    # Valida board: remove duplicatas e colisões com hole cards
+    board = _validate_board(board, hole_cards)
+
+    # Normaliza formato das cartas: Rank maiúsculo + suit minúsculo
+    board      = [_norm_card(c) for c in board if _norm_card(c)]
+    hole_cards = [_norm_card(c) for c in hole_cards if _norm_card(c)]
+
     pot_by_street = {s: total_pot for s in streets[1:] if total_pot}
 
     return HandHistory(
         table_id=table_id,
-        button_seat=0,
-        players={},
+        button_seat=button_seat,
+        players=players,
         hole_cards=hole_cards,
         board=board,
         streets=streets,
@@ -273,6 +315,141 @@ def _build_hand_for_segment(
         actions=[],
         showdown=showdown,
     )
+
+
+def _extract_players(
+    seg: list[TableEvent],
+    frames_cache: dict[int, np.ndarray],
+) -> dict:
+    """
+    Tenta extrair nomes e stacks de jogadores via OCR nos frames preflop.
+    Retorna {seat_num: {"name": str, "chips": float}} onde seat_num é
+    estimado pela ordem de detecção (1-8).
+    Retorna {} se OCR de stacks falhar ou retornar poucos resultados.
+    """
+    preflop = sorted(
+        [e for e in seg if e.board_cards == 0],
+        key=lambda e: e.timestamp,
+    )[:3]
+
+    all_stacks: list[dict[str, float]] = []
+    for ev in preflop:
+        crop = frames_cache.get(ev.frame_idx)
+        if crop is None:
+            continue
+        stacks = ocr_stacks(crop)
+        if stacks:
+            all_stacks.append(stacks)
+
+    if not all_stacks:
+        return {}
+
+    # Usa o frame com mais jogadores detectados
+    best = max(all_stacks, key=len)
+
+    # Converte para formato HandHistory.players
+    # Seat numbers são estimados como 1..N pela ordem de aparecimento
+    players = {}
+    for i, (name, chips_bb) in enumerate(best.items(), 1):
+        players[i] = {
+            "name": name,
+            "chips": round(chips_bb * BB_TO_USD, 2),
+        }
+
+    return players
+
+
+def _detect_button_seat(
+    seg: list[TableEvent],
+    frames_cache: dict[int, np.ndarray],
+) -> int:
+    """
+    Detecta o seat do dealer button via template matching (dealer.PNG).
+    Mapeia posição (cx, cy) do dealer puck para seat number (1-8, 8-max).
+
+    Layout WPT Global 8-max (frações aproximadas do crop 960x540):
+      Seat 1 (CO/BTN area): cx≈0.75, cy≈0.45
+      Seat 2 (BTN/SB area): cx≈0.60, cy≈0.80
+      Seat 3 (SB/BB area):  cx≈0.40, cy≈0.85
+      Seat 4 (BB/STR area): cx≈0.22, cy≈0.70
+      Seat 5 (UTG area):    cx≈0.12, cy≈0.45
+      Seat 6 (MP area):     cx≈0.20, cy≈0.25
+      Seat 7 (HJ area):     cx≈0.40, cy≈0.15
+      Seat 8 (CO area):     cx≈0.62, cy≈0.18
+    Retorna 0 se não detectado.
+    """
+    # Zonas aproximadas de cada seat: (cx_min, cx_max, cy_min, cy_max, seat)
+    SEAT_ZONES = [
+        (0.60, 0.90, 0.35, 0.60, 1),  # direita-meio
+        (0.50, 0.75, 0.70, 0.95, 2),  # direita-baixo
+        (0.28, 0.55, 0.75, 0.95, 3),  # centro-baixo
+        (0.10, 0.35, 0.55, 0.85, 4),  # esquerda-baixo
+        (0.02, 0.22, 0.35, 0.60, 5),  # esquerda-meio
+        (0.08, 0.35, 0.10, 0.35, 6),  # esquerda-cima
+        (0.30, 0.55, 0.05, 0.28, 7),  # centro-cima
+        (0.50, 0.78, 0.05, 0.28, 8),  # direita-cima
+    ]
+
+    # Usa frames preflop (sem board) para detectar o dealer
+    preflop = sorted(
+        [e for e in seg if e.board_cards == 0],
+        key=lambda e: e.timestamp,
+    )[:5]
+
+    for ev in preflop:
+        crop = frames_cache.get(ev.frame_idx)
+        if crop is None:
+            continue
+        pos = detect_dealer_button(crop)
+        if pos is None:
+            continue
+        cx, cy = pos
+        for cx_min, cx_max, cy_min, cy_max, seat in SEAT_ZONES:
+            if cx_min <= cx <= cx_max and cy_min <= cy <= cy_max:
+                return seat
+
+    return 0
+
+
+_VALID_RANKS_LOW = set("23456789tjqka")
+_VALID_SUITS_LOW = set("cdhs")
+
+
+def _norm_card(card: str) -> str | None:
+    """
+    Normaliza carta para formato PokerStars: Rank maiúsculo + suit minúsculo.
+    Ex: 'ah' -> 'Ah', '9C' -> '9c', 'TS' -> 'Ts'.
+    Retorna None se inválida.
+    """
+    if not card or len(card) != 2:
+        return None
+    rank = card[0].lower()
+    suit = card[1].lower()
+    if rank not in _VALID_RANKS_LOW or suit not in _VALID_SUITS_LOW:
+        return None
+    r_out = rank.upper() if rank in 'tjqka' else rank
+    return r_out + suit
+
+
+def _validate_board(board: list[str], hole_cards: list[str]) -> list[str]:
+    """
+    Remove cartas duplicadas do board e elimina cartas que colidem com
+    as hole cards do herói. Mantém a ordem original das cartas.
+    """
+    if not board:
+        return board
+
+    seen: set[str] = set()
+    avoid: set[str] = {c.lower() for c in hole_cards}
+    result: list[str] = []
+
+    for card in board:
+        card_low = card.lower()
+        if card_low not in seen and card_low not in avoid:
+            seen.add(card_low)
+            result.append(card)
+
+    return result
 
 
 def _detect_streets(seg: list[TableEvent]) -> list[str]:
@@ -302,17 +479,22 @@ def _vote_slots_for_event(
     """
     Vota por maioria em cada slot para um board_change event.
     Retorna (slotted_result, new_card_votes) onde:
-      - slotted_result[i] é None se o slot não teve votos
+      - slotted_result[i] é None se o slot não teve votos suficientes
       - new_card_votes = votos da carta vencedora no último slot (novo card)
     frames_cache[frame_idx] = crop já recortado para a mesa tid.
+
+    Rejeita cartas que aparecem em apenas 1 frame quando há >= 3 frames votando
+    (filtro de outlier para reduzir falsos positivos do OCR).
     """
     slot_votes: list[Counter] = [Counter() for _ in range(n)]
+    frames_tried = 0
 
     for offset in extra_frames:
         fi = ev.frame_idx + offset
         crop = frames_cache.get(fi)
         if crop is None:
             continue
+        frames_tried += 1
         slotted = extract_board_cards_slotted(crop, n)
         for i, card in enumerate(slotted):
             if card is not None:
@@ -320,9 +502,16 @@ def _vote_slots_for_event(
 
     result: list[str | None] = []
     for i in range(n):
-        if slot_votes[i]:
-            best = slot_votes[i].most_common(1)[0][0]
-            result.append(best)
+        if not slot_votes[i]:
+            result.append(None)
+            continue
+        top = slot_votes[i].most_common(2)
+        best_card, best_votes = top[0]
+        # Rejeita se unanimidade mínima não atingida com múltiplos frames
+        # (evita aceitar leitura única espúria)
+        min_votes = 2 if frames_tried >= 3 else 1
+        if best_votes >= min_votes:
+            result.append(best_card)
         else:
             result.append(None)
 
@@ -414,20 +603,32 @@ def _extract_final_pot(
     # Pega os últimos N eventos com board > 0 (final da mão antes de resetar)
     active = sorted([e for e in seg if e.board_cards > 0], key=lambda e: e.timestamp)
 
-    # Tenta a partir do fim (mais provável de ter o pot final)
-    candidates = active[-5:] if len(active) >= 5 else active
-    candidates = list(reversed(candidates))  # do mais recente ao mais antigo
+    # Estratégia dupla:
+    # 1. Últimos N frames da mão (pot mais provável de estar no máximo)
+    # 2. Todos os frames com board para detectar pico (peak tracking)
+    all_pots: list[float] = []
 
-    pots: list[float] = []
-    for ev in candidates[:5]:
+    # Amostra frames distribuídos ao longo da mão com board ativo
+    sample_evs: list = active[-8:] if len(active) >= 8 else active
+    for ev in sample_evs:
         crop = frames_cache.get(ev.frame_idx)
         if crop is None:
             continue
         pot_bb = ocr_pot(crop)
         if pot_bb and pot_bb > 0:
-            pots.append(pot_bb * BB_TO_USD)
+            all_pots.append(pot_bb * BB_TO_USD)
 
-    return max(pots) if pots else None
+    if not all_pots:
+        return None
+
+    # O pot final é o pico (max) durante a mão ativa
+    # Descarta outliers estatísticos: remove valores > 2x a mediana
+    import statistics
+    if len(all_pots) >= 3:
+        med = statistics.median(all_pots)
+        filtered = [p for p in all_pots if p <= med * 2.5]
+        return max(filtered) if filtered else max(all_pots)
+    return max(all_pots)
 
 
 def _extract_hole_cards(
@@ -436,29 +637,42 @@ def _extract_hole_cards(
     frames_cache: dict[int, np.ndarray],
 ) -> list[str]:
     """
-    Tenta extrair hole cards do herói.
-    Estratégia: pré-flop (board==0) primeiro, depois flop/turn.
+    Tenta extrair hole cards do herói via votação por maioria entre frames.
+    Prioridade: pré-flop (cartas recém-distribuídas) → flop/turn.
     """
-    # Candidatos pré-flop (cartas recém-distribuídas)
     preflop = sorted(
         [e for e in seg if e.board_cards == 0],
         key=lambda e: e.timestamp,
-    )[:5]
-    # Candidatos flop/turn (herói ainda na mão)
+    )[:8]
     early_board = sorted(
         [e for e in seg if e.board_cards in (3, 4)],
         key=lambda e: e.timestamp,
-    )[:3]
+    )[:4]
 
+    # Votação por par de hole cards
+    pair_votes: Counter = Counter()
     for ev in preflop + early_board:
         crop = frames_cache.get(ev.frame_idx)
         if crop is None:
             continue
         cards = ocr_hole_cards(crop)
         if len(cards) >= 2:
-            return cards[:2]
+            # Usa par ordenado como chave (ordem pode variar entre frames)
+            key = tuple(sorted(c.lower() for c in cards[:2]))
+            pair_votes[key] += 1
 
-    return []
+    if not pair_votes:
+        return []
+
+    best_pair, n_votes = pair_votes.most_common(1)[0]
+    # Aceita com pelo menos 1 voto, mas prefere votos múltiplos
+    frames_tried = len(preflop) + len(early_board)
+    if frames_tried >= 3 and n_votes == 1 and len(pair_votes) > 1:
+        # Apenas 1 frame votou num par único com outros candidatos → fraco
+        return []
+
+    # Retorna as cartas normalizadas
+    return [_norm_card(c) or c for c in best_pair]
 
 
 def _extract_showdown_cards(
@@ -489,7 +703,7 @@ def _extract_showdown_cards(
     )
 
     search_start = max(0.0, seg_end_ts - 2.0)
-    search_end   = min(next_new_hand_ts + 2.0, seg_end_ts + 25.0)
+    search_end   = min(next_new_hand_ts + 2.0, seg_end_ts + 15.0)
 
     # Acumula votos por posicao espacial aproximada
     # Chave: (x//50, y//50) — celula de 50px para agrupar deteccoes do mesmo seat
@@ -511,7 +725,7 @@ def _extract_showdown_cards(
                 if cell not in pos_votes:
                     pos_votes[cell] = Counter()
                 pos_votes[cell][pair] += 1
-        t += 1.0
+        t += 2.0
 
     # Para cada posicao, escolhe o par com mais votos
     result: dict[str, list[str]] = {}
@@ -541,23 +755,25 @@ def _extract_winner(
 ) -> Optional[str]:
     """
     Detecta o vencedor buscando o badge 'WINNER'.
-    Usa next_new_hand de all_evs para cobrir o "dead zone" após o último evento do segmento.
+    Usa votação por maioria entre todos os frames da janela pos-mao
+    para robustez a falsos positivos do OCR.
     """
     seg_end_ts = max(e.timestamp for e in seg)
 
-    # Próximo new_hand APÓS o fim do segmento (em qualquer mesa)
     future_new_hands = sorted(
-        [e for e in all_evs if e.table_idx == tid and e.event_type == "new_hand" and e.timestamp > seg_end_ts],
+        [e for e in all_evs if e.table_idx == tid
+         and e.event_type == "new_hand" and e.timestamp > seg_end_ts],
         key=lambda e: e.timestamp,
     )
-    if future_new_hands:
-        next_new_hand_ts = future_new_hands[0].timestamp
-    else:
-        next_new_hand_ts = seg_end_ts + 20.0
+    next_new_hand_ts = (
+        future_new_hands[0].timestamp if future_new_hands else seg_end_ts + 20.0
+    )
 
-    search_start = max(0.0, seg_end_ts - 3.0)
-    search_end = min(next_new_hand_ts + 3.0, seg_end_ts + 30.0)
-    step_s = 1.0
+    search_start = max(0.0, seg_end_ts - 2.0)
+    search_end = min(next_new_hand_ts + 2.0, seg_end_ts + 15.0)
+
+    votes: Counter = Counter()
+    frames_checked = 0
 
     t = search_start
     while t <= search_end:
@@ -566,7 +782,17 @@ def _extract_winner(
         if crop is not None:
             winner = ocr_winner(crop)
             if winner:
-                return winner
-        t += step_s
+                votes[winner] += 1
+            frames_checked += 1
+        t += 2.0
 
-    return None
+    if not votes:
+        return None
+
+    # Retorna vencedor com maioria de votos; rejeita se só 1 frame votou
+    # e há múltiplos frames disponíveis (evita falsos positivos)
+    best, count = votes.most_common(1)[0]
+    if frames_checked >= 3 and count == 1:
+        # Candidato único em apenas 1 frame — muito fraco, descarta
+        return None
+    return best
