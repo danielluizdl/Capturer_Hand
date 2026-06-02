@@ -166,13 +166,54 @@ output.txt  (formato PokerStars)
 
 ---
 
-## Como melhorar a acurácia das cartas
+## Como melhorar a acurácia — Workflow de anotação com Claude
 
-Hoje: 1 imagem por carta por contexto. Com mais capturas, o CNN fica mais preciso.
+O WPT Global **não exporta hand history**. A estratégia para criar ground truth e expandir o dataset CNN é:
 
-1. **Capturar mais templates:** jogar e pausar o vídeo em showdowns/boards diferentes, recortar com `crop_seat_cards.py`
-2. **Retreinar:** `python train_card_classifier.py` após adicionar imagens
-3. **Sem ground truth automático** — o WPT Global não exporta hand history, então toda validação é manual ou via gabarito gravado na mão
+### Fase 1 — Extrair frames-chave do vídeo longo
+```bash
+python extract_key_frames.py video_longo_teste.mp4
+```
+Cria `key_frames/` com ~300-600 frames organizados por mesa/mão:
+- `preflop.png` — nomes e stacks dos jogadores
+- `flop.png` + `flop_slot_0.png` ... `flop_slot_2.png` — cartas do flop
+- `turn.png`, `river.png` — mesma lógica
+- `showdown_00.png` ... `showdown_08.png` — janela de showdown (a cada 2s)
+- `meta.json` — timestamps e metadados da mão
+
+### Fase 2 — Anotação por Claude (sessões de 30 mãos)
+Em uma nova sessão, pedir:
+> "Abra annotate_frames.py --batch 30 e anote o próximo lote de mãos"
+
+Claude lê cada imagem com a ferramenta Read, identifica:
+- Cartas do board
+- Hole cards do hero
+- Cartas dos villains no showdown
+- Vencedor e pot
+
+Salva `annotations.json` em cada pasta de mão.
+
+Verificar progresso:
+```bash
+python annotate_frames.py --status
+```
+
+### Fase 3 — Compilar em dados de treino + gabarito
+```bash
+python compile_training_data.py
+```
+- Gera `training_data/<carta>/` com centenas de exemplos CNN
+- Gera `gabarito_longo.txt` com todas as mãos anotadas
+
+### Fase 4 — Retreinar CNN com dados expandidos
+```bash
+python train_card_classifier.py --extra training_data/
+```
+
+### Fase 5 — Validar
+```bash
+python agent_loop.py --gabarito gabarito_longo.txt
+```
 
 ---
 
