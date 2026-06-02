@@ -84,8 +84,16 @@ def _score_hand(det: HandHistory | None, gab: HandHistory) -> dict:
 
     det_board = det.board if det else []
     if gab.board:
+        # Comparação case-insensitive; aceita set-match parcial quando board
+        # foi detectado mas em ordem diferente (Turn/River em ordem trocada)
         correct = sum(1 for i, c in enumerate(gab.board)
                       if i < len(det_board) and det_board[i].lower() == c.lower())
+        # Bonus: todos os cards corretos mesmo que em ordem diferente (set match)
+        if correct < len(gab.board):
+            gab_set = {c.lower() for c in gab.board}
+            det_set = {c.lower() for c in det_board}
+            if gab_set == det_set:
+                correct = len(gab.board)  # aceita ordem diferente
         t1["board_cards"] = round(correct / len(gab.board) * RUBRIC["board_cards"])
     else:
         t1["board_cards"] = 0
@@ -95,6 +103,10 @@ def _score_hand(det: HandHistory | None, gab: HandHistory) -> dict:
     for i, c in enumerate(gab.hole_cards):
         if i < len(det_holes) and det_holes[i].lower() == c.lower():
             t1["hole_cards"] += 10
+    # Bonus: ambas as hole cards corretas mas em ordem trocada
+    if t1["hole_cards"] == 0 and len(gab.hole_cards) == 2 and len(det_holes) == 2:
+        if {c.lower() for c in gab.hole_cards} == {c.lower() for c in det_holes}:
+            t1["hole_cards"] = RUBRIC["hole_cards"]  # set match
     t1["hole_cards"] = min(t1["hole_cards"], RUBRIC["hole_cards"])
 
     det_streets = set(det.streets) if det else set()
