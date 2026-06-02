@@ -414,13 +414,21 @@ def find_showdown_cards(
         from src.card_cnn import get_card_cnn
         _cnn_model = get_card_cnn()
         ih, iw = search_img.shape[:2]
-        def _refine(hits):
-            out = {}
+
+        def _refine(hits: dict) -> dict:
+            out: dict = {}
             for card, (x, y, w, h, score) in hits.items():
-                region = search_img[max(0,y):min(ih,y+h), max(0,x):min(iw,x+w)]
+                region = search_img[max(0, y):min(ih, y+h), max(0, x):min(iw, x+w)]
                 pred, conf = _cnn_model.predict(region)
-                out[pred if (conf >= 0.65 and len(pred)==2) else card] = (x,y,w,h,score)
+                final = pred if (conf >= 0.65 and len(pred) == 2) else card
+                # Colisão: CNN mapeou duas cartas para o mesmo código → fica maior score
+                if final in out:
+                    if score > out[final][4]:
+                        out[final] = (x, y, w, h, score)
+                else:
+                    out[final] = (x, y, w, h, score)
             return out
+
         left_hits  = _refine(left_hits)
         right_hits = _refine(right_hits)
     except Exception:

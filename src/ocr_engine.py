@@ -239,36 +239,61 @@ def ocr_pot(crop: np.ndarray) -> float | None:
 def ocr_stacks(crop: np.ndarray) -> dict[str, float]:
     """
     OCR de stacks dos jogadores. Retorna {nome: chips_bb}.
-    Varre a imagem inteira em busca de padrões XX,XXBB.
+    Varre a imagem inteira em busca de padrões XX,XXBB e associa com
+    nomes de jogadores próximos espacialmente.
     """
     result: dict[str, float] = {}
 
-    # Zonas conhecidas onde aparecem jogadores e seus stacks
-    regions = [
-        crop[0:540, 0:960],   # full crop
-    ]
+    items = _raw_ocr(crop)
+    if not items:
+        return result
 
-    for roi in regions:
-        items = _raw_ocr(roi)
-        # Processa pares consecutivos: nome, valor BB
-        texts = [(t, c) for _, t, c in items]
-        for i, (text, _) in enumerate(texts):
-            m = re.search(r'([\d,\.]+)\s*BB', text, re.IGNORECASE)
-            if m:
-                val = m.group(1).replace(",", ".")
-                try:
-                    bb = float(val)
-                except ValueError:
-                    continue
-                # Tenta associar com nome anterior
-                if i > 0:
-                    prev_text = texts[i - 1][0].strip()
-                    if prev_text and not re.search(r'[\d,\.]', prev_text):
-                        result[prev_text] = bb
-                elif i + 1 < len(texts):
-                    next_text = texts[i + 1][0].strip()
-                    if next_text and not re.search(r'[\d,\.]', next_text):
-                        result[next_text] = bb
+    # Constrói lista de (bbox_center, text, conf)
+    entries = []
+    for bbox, text, conf in items:
+        cx = float(np.mean([p[0] for p in bbox]))
+        cy = float(np.mean([p[1] for p in bbox]))
+        entries.append((cx, cy, text, conf))
+
+    # Encontra todos os valores BB com sua posição
+    bb_values: list[tuple[float, float, float]] = []
+    name_candidates: list[tuple[float, float, str]] = []
+
+    for cx, cy, text, conf in entries:
+        m = re.search(r'([\d,\.O0lI]{2,})\s*BB', text, re.IGNORECASE)
+        if m:
+            try:
+                val_str = m.group(1).replace(",", ".").translate(
+                    str.maketrans({'O': '0', 'o': '0', 'l': '1', 'I': '1'})
+                )
+                val = float(val_str)
+                if 0.5 <= val <= 2000:
+                    bb_values.append((cx, cy, val))
+            except ValueError:
+                pass
+        elif conf >= 0.7 and len(text.strip()) >= 3:
+            clean = text.strip()
+            # Candidato de nome: tem pelo menos 1 letra, não é número puro
+            if any(c.isalpha() for c in clean) and not re.fullmatch(r'[\d,\.]+\s*BB?', clean, re.I):
+                name_candidates.append((cx, cy, clean))
+
+    # Associa cada BB ao nome mais próximo verticalmente
+    for bx, by, bb in bb_values:
+        best_name = None
+        best_dist = 120.0  # max 120px de distância
+
+        for nx, ny, name in name_candidates:
+            # Mesma linha vertical (|dy| < 40) e horizontalmente próximo
+            dy = abs(ny - by)
+            dx = abs(nx - bx)
+            if dy < 40 and dx < 300:
+                dist = dy * 2 + dx * 0.5
+                if dist < best_dist:
+                    best_dist = dist
+                    best_name = name
+
+        if best_name:
+            result[best_name] = bb
 
     return result
 
