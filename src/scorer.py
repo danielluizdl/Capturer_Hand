@@ -182,20 +182,30 @@ def _match_actions(det: list[tuple], gab: list[tuple]) -> int:
 
 
 def print_report(report: dict) -> None:
-    """Imprime relatório detalhado do score."""
-    total = report["total_pts"]
-    max_t = report["max_pts"]
-    pct   = report["pct"]
+    """Imprime relatório detalhado do score (Tier 1 + Tier 2)."""
+    t1    = report["total_t1"]
+    t2    = report["total_t2"]
+    total = report["total_all"]
+    max_t1  = report["max_t1"]
+    max_t2  = report["max_t2"]
+    max_all = report["max_all"]
+    pct_t1  = report["pct_t1"]
+    pct_t2  = report["pct_t2"]
+    pct_all = report["pct_all"]
 
-    print("=" * 52)
-    print(f"SCORE TOTAL: {total}/{max_t} ({pct:.1f}%)")
-    print("=" * 52)
+    print("=" * 60)
+    print(f"SCORE TIER 1:  {t1}/{max_t1} ({pct_t1:.1f}%)")
+    print(f"SCORE TIER 2:  {t2}/{max_t2} ({pct_t2:.1f}%)")
+    print(f"SCORE TOTAL:   {total}/{max_all} ({pct_all:.1f}%)")
+    print("=" * 60)
 
     for hs in report["hands"]:
-        tid = hs["table_id"]
-        t   = hs["total"]
-        m   = hs["max"]
-        print(f"\nMão {tid}:  {t}/{m}")
+        tid  = hs["table_id"]
+        ht1  = hs["total_t1"]
+        ht2  = hs["total_t2"]
+        m    = hs["max"]
+        m2   = hs["max_t2"]
+        print(f"\nMão {tid}:  T1={ht1}/{m}  T2={ht2}/{m2}")
 
         s = hs["scores"]
 
@@ -224,7 +234,7 @@ def print_report(report: dict) -> None:
         # final_pot
         dp = hs["det_pot"]
         gp = hs["gab_pot"]
-        pot_detail = f"det={dp:.2f}BB gab={gp:.2f}BB" if dp else f"não detectado (gab={gp:.2f})"
+        pot_detail = f"det=${dp:.2f} gab=${gp:.2f}" if dp else f"não detectado (gab=${gp:.2f})"
         print(f"  final_pot:       {s['final_pot']:2d}/{RUBRIC['final_pot']}  {pot_detail}")
 
         # winner
@@ -232,6 +242,15 @@ def print_report(report: dict) -> None:
         gw = hs["gab_winner"]
         ok = "✓" if s["winner"] == RUBRIC["winner"] else f"det={dw} gab={gw}"
         print(f"  winner:          {s['winner']:2d}/{RUBRIC['winner']}  {ok}")
+
+        # Tier 2
+        s2 = hs.get("scores_t2", {})
+        if any(v > 0 for v in s2.values()):
+            print(f"  --- Tier 2 ---")
+            for key, max_pts in RUBRIC_T2.items():
+                pts = s2.get(key, 0)
+                ok = "✓" if pts == max_pts else ("—" if pts > 0 else "✗")
+                print(f"  {key:<20} {pts:2d}/{max_pts}  {ok}")
 
 
 def _board_detail(det: list[str], gab: list[str]) -> str:
