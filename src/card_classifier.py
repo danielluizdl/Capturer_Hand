@@ -188,6 +188,10 @@ def extract_board_cards_slotted(table_crop: np.ndarray, n_cards: int) -> list[st
     """
     Como extract_board_cards, mas retorna lista de tamanho n_cards com None
     em slots onde a detecção falhou. Permite votação independente por slot.
+
+    Pipeline por slot:
+    1. CNN no crop centrado (conf >= 0.65) com verificação HSV de naipe
+    2. Fallback: HSV (naipe) + OCR (rank)
     """
     if n_cards not in (3, 4, 5):
         return []
@@ -199,19 +203,44 @@ def extract_board_cards_slotted(table_crop: np.ndarray, n_cards: int) -> list[st
 
     RANK_LEFT_SHIFT = 25
 
+    # Tenta carregar CNN uma vez para todos os slots
+    _cnn = None
+    try:
+        from src.card_cnn import get_card_cnn
+        _cnn = get_card_cnn()
+    except Exception:
+        pass
+
     result: list[str | None] = [None] * n_cards
     for i in range(n_cards):
         cx  = int(w * SLOT_X[i])
-
-        # --- Naipe: crop centrado ---
         sx1 = max(0, cx - hw)
         sx2 = min(w, cx + hw)
         suit_crop = table_crop[y1:y2, sx1:sx2]
+
+        # Tenta CNN
+        if _cnn is not None:
+            try:
+                cnn_card, conf = _cnn.predict(suit_crop)
+                if conf >= 0.65 and len(cnn_card) == 2:
+                    cnn_rank = cnn_card[0].upper() if cnn_card[0] in 'tjqka' else cnn_card[0]
+                    if cnn_rank in VALID_RANKS:
+                        # Verifica naipe via HSV em confiança moderada
+                        if conf < 0.85:
+                            hsv_suit = detect_suit(suit_crop)
+                            final_suit = hsv_suit if hsv_suit != "?" else cnn_card[1]
+                        else:
+                            final_suit = cnn_card[1]
+                        result[i] = cnn_rank + final_suit
+                        continue
+            except Exception:
+                pass
+
+        # Fallback: HSV + OCR
         suit = detect_suit(suit_crop)
         if suit == "?":
             continue
 
-        # --- Rank: crop deslocado para a esquerda ---
         rx1 = max(0, cx - hw - RANK_LEFT_SHIFT)
         rx2 = min(w, cx + hw - RANK_LEFT_SHIFT)
         rank_crop = table_crop[y1:y2, rx1:rx2]
